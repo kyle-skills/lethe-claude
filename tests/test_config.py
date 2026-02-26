@@ -1,6 +1,8 @@
 """Tests for Lethe permission configuration resolution."""
 
+import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -168,6 +170,60 @@ class TestResolveConfig(unittest.TestCase):
             result = resolve_config(project_dir=tmpdir)
             self.assertEqual(result["compactor_permission"], "bypassPermissions")
             self.assertEqual(result["resume_permission"], "acceptEdits")
+
+
+SCRIPT = str(Path(__file__).resolve().parent.parent / "skill" / "scripts" / "lethe-config.py")
+
+
+class TestLetheConfigCLI(unittest.TestCase):
+    def setUp(self):
+        for var in ("LETHE_COMPACTOR_PERMISSION", "LETHE_RESUME_PERMISSION"):
+            os.environ.pop(var, None)
+
+    def tearDown(self):
+        for var in ("LETHE_COMPACTOR_PERMISSION", "LETHE_RESUME_PERMISSION"):
+            os.environ.pop(var, None)
+
+    def test_outputs_valid_json(self):
+        result = subprocess.run(
+            [sys.executable, SCRIPT],
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0)
+        output = json.loads(result.stdout)
+        self.assertEqual(output["compactor_permission"], "acceptEdits")
+        self.assertIsNone(output["resume_permission"])
+
+    def test_respects_env_var(self):
+        env = os.environ.copy()
+        env["LETHE_COMPACTOR_PERMISSION"] = "bypassPermissions"
+        result = subprocess.run(
+            [sys.executable, SCRIPT],
+            capture_output=True, text=True, timeout=10, env=env,
+        )
+        output = json.loads(result.stdout)
+        self.assertEqual(output["compactor_permission"], "bypassPermissions")
+
+    def test_respects_project_dir_arg(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / ".lethe_config").write_text("resume_permission=acceptEdits\n")
+            result = subprocess.run(
+                [sys.executable, SCRIPT, "--project-dir", tmpdir],
+                capture_output=True, text=True, timeout=10,
+            )
+            output = json.loads(result.stdout)
+            self.assertEqual(output["resume_permission"], "acceptEdits")
+
+    def test_always_exits_zero(self):
+        env = os.environ.copy()
+        env["LETHE_COMPACTOR_PERMISSION"] = "invalid_garbage"
+        result = subprocess.run(
+            [sys.executable, SCRIPT],
+            capture_output=True, text=True, timeout=10, env=env,
+        )
+        self.assertEqual(result.returncode, 0)
+        output = json.loads(result.stdout)
+        self.assertEqual(output["compactor_permission"], "acceptEdits")  # fell back
 
 
 if __name__ == "__main__":
