@@ -189,7 +189,6 @@ Centralized rules guiding segment-level decisions. Applied in order — first ma
 | `tool_chain` (Bash with git diff) | Aggressive Trim | Summarize files changed |
 | `task_result` | Aggressive Trim | Subagent results, keep outcome only |
 | `conversation` | Evaluate | May be critical decisions or casual chat |
-| `mixed` | Evaluate | Context-dependent |
 | (final segment) | Always Keep | Last assistant response before compaction |
 
 ### Always Drop
@@ -226,7 +225,8 @@ The context header is the first N segments of the conversation, defined as: ever
 ### Context Budget Safety Valve
 
 If the manifest contains more than 30 segments requiring evaluation, apply automatic collapse:
-- All `tool_chain` and `mcp_chain` segments in the oldest 50% of the conversation → auto Aggressive Trim (skip evaluation)
+- `conversation` segments in the oldest 50% of the conversation → auto SUMMARIZE with generic summary
+- `error_chain` segments in the oldest 50% → auto SUMMARIZE with error context
 - Only evaluate segments in the newest 50%
 - This prevents the compactor from exhausting its own context reading segment content
 
