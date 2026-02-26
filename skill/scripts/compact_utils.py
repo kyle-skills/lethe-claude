@@ -20,6 +20,7 @@ BRIDGE_TYPES = {"saved_hook_context"}
 CHAIN_SYSTEM_SUBTYPES = {
     "compact_boundary", "microcompact_boundary",
     "stop_hook_summary", "turn_duration", "local_command",
+    "api_error",
 }
 
 # Diff markers for git_diff detection
