@@ -1,5 +1,13 @@
 {
   "name": "lethe",
   "description": "Surgical context compaction — a measured sip from the river of forgetfulness",
-  "version": "1.0.0"
+  "version": "1.0.0",
+  "author": {
+    "name": "Kyle Corbeille",
+    "url": "https://github.com/kyle-skills"
+  },
+  "homepage": "https://github.com/kyle-skills/lethe-claude",
+  "repository": "https://github.com/kyle-skills/lethe-claude.git",
+  "license": "MIT",
+  "keywords": ["compaction", "context-management", "jsonl", "session", "memory"]
 }
