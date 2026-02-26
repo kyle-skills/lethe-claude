@@ -219,6 +219,15 @@ Note: if the compactor aborts at any phase (1-4), always clean up
 
 If --orchestrate was provided → follow Section A. Otherwise → follow Section B.
 Do not mix sections. Execute exactly one.
+
+Before branching into Section A or B, resolve permission configuration:
+```bash
+python3 scripts/lethe-config.py --project-dir <cwd>
+```
+where `<cwd>` is from the Phase 2 manifest metadata (or `INITIAL_CWD` fallback).
+Parse the JSON output and extract `resume_permission`.
+If `resume_permission` is null, omit `--permission-mode` from all relaunch/resume
+commands below. If non-null, include `--permission-mode <resume_permission>`.
 </mandatory>
 
 <core>
@@ -234,17 +243,18 @@ Do not mix sections. Execute exactly one.
    Parse the JSON output: extract `terminal` and `terminal_launch`.
    If `terminal` is null, output:
    "Terminal not detected. Exit this session first, then run:
-   `env -u CLAUDECODE claude --resume $SESSION_ID`"
+   `env -u CLAUDECODE claude [--permission-mode <resume_permission>] --resume $SESSION_ID`"
+   Include `--permission-mode <resume_permission>` only when `resume_permission` is non-null.
    If `RESUME_PROMPT` is non-empty, append it as a single double-quoted trailing
    argument so the final command looks like:
-   `env -u CLAUDECODE claude --resume <session-id> "prompt text"`
+   `env -u CLAUDECODE claude [--permission-mode <resume_permission>] --resume <session-id> "prompt text"`
    Do not emit doubled wrapping like `""prompt text""`. Then stop.
 3. Build a launch script to avoid nested quoting:
    ```bash
    DELIM="RELAUNCH_$(uuidgen | tr -d '-')"
    cat > /tmp/lethe/$SESSION_ID/relaunch.sh << "$DELIM"
    #!/bin/bash
-   exec env -u CLAUDECODE claude --resume <session-id> "<resume-prompt>"
+   exec env -u CLAUDECODE claude [--permission-mode <resume_permission>] --resume <session-id> "<resume-prompt>"
    $DELIM
    chmod +x /tmp/lethe/$SESSION_ID/relaunch.sh
    ```
@@ -252,6 +262,7 @@ Do not mix sections. Execute exactly one.
    heredoc content. The resume prompt must be double-quoted in the exec line.
    Escape backslashes (`\` → `\\`) and double quotes (`"` → `\"`) in the
    prompt before substitution.
+   Include `--permission-mode <resume_permission>` only when `resume_permission` is non-null.
    If RESUME_PROMPT was not provided, omit it from the `claude --resume` command.
    The UUID-based heredoc delimiter prevents injection if the resume prompt
    contains a delimiter string.
@@ -275,7 +286,8 @@ Do not mix sections. Execute exactly one.
    Segments: [kept] kept, [summarized] summarized, [dropped] dropped."
 2. Ask the user: "Launch the resumed session in a new terminal?"
    - If no: output the manual command:
-     `env -u CLAUDECODE claude --resume $SESSION_ID` and stop.
+     `env -u CLAUDECODE claude [--permission-mode <resume_permission>] --resume $SESSION_ID`
+     Include `--permission-mode` only when `resume_permission` is non-null. Then stop.
    - If yes: continue to step 3.
 3. Retrieve `cwd` from the Phase 2 manifest metadata. If null/empty, use
    `INITIAL_CWD` from Phase 2 step 1. If that is unavailable, use `$HOME`.
@@ -286,18 +298,19 @@ Do not mix sections. Execute exactly one.
    Parse the JSON output: extract `terminal` and `terminal_launch`.
    If `terminal` is null, output the manual command:
    "Exit this session first, then run:
-   `env -u CLAUDECODE claude --resume $SESSION_ID`"
-   and stop.
+   `env -u CLAUDECODE claude [--permission-mode <resume_permission>] --resume $SESSION_ID`"
+   Include `--permission-mode` only when `resume_permission` is non-null. Then stop.
 5. Build a launch script to avoid nested quoting:
    ```bash
    DELIM="RESUME_$(uuidgen | tr -d '-')"
    cat > /tmp/lethe/$SESSION_ID/resume.sh << "$DELIM"
    #!/bin/bash
-   exec env -u CLAUDECODE claude --resume <session-id>
+   exec env -u CLAUDECODE claude [--permission-mode <resume_permission>] --resume <session-id>
    $DELIM
    chmod +x /tmp/lethe/$SESSION_ID/resume.sh
    ```
    Substitute `<session-id>` with the actual session ID.
+   Include `--permission-mode <resume_permission>` only when `resume_permission` is non-null.
    `env -u CLAUDECODE` prevents nested session conflicts.
 6. Launch via the terminal template. Replace `{command}` in `terminal_launch`
    with `/tmp/lethe/$SESSION_ID/resume.sh`:
