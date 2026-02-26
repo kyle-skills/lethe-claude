@@ -127,9 +127,35 @@ If your terminal isn't detected, Lethe falls back to printing a manual `claude -
 
 ## Permissions
 
-Lethe operates entirely through Bash commands — every Python script invocation, process signal, and file write goes through Claude Code's Bash tool. By default, Claude Code prompts for user confirmation on each Bash call. This means you'll be asked to approve every `python3`, `kill`, `mkdir`, etc. individually.
+### Permission Modes
 
-For uninterrupted operation, add allow rules to your Claude Code settings (`.claude/settings.json` or project-level):
+Lethe launches two types of Claude Code sessions, each with a configurable `--permission-mode`:
+
+| Session | Env var | `.lethe_config` key | Default |
+|---|---|---|---|
+| Compactor | `LETHE_COMPACTOR_PERMISSION` | `compactor_permission` | `acceptEdits` |
+| Resumed | `LETHE_RESUME_PERMISSION` | `resume_permission` | *(no flag)* |
+
+Valid values are `acceptEdits` and `bypassPermissions`. Invalid values produce a warning and fall back to the default — misconfiguration never silently escalates permissions.
+
+**Resolution order** (per key, first match wins):
+1. Environment variable
+2. Project-level `.lethe_config` (in project root)
+3. User-level `.lethe_config` (in `$HOME`)
+4. Hardcoded default
+
+Example `.lethe_config`:
+```
+# Project-level Lethe configuration
+compactor_permission=bypassPermissions
+resume_permission=acceptEdits
+```
+
+Keys use the same names as the env vars without the `LETHE_` prefix. One key=value per line, `#` comments, no whitespace around `=`.
+
+### Bash Allow Rules
+
+Note that `--permission-mode acceptEdits` does **not** cover Bash commands — it only auto-approves file edits. Even with `bypassPermissions`, you may want allow rules for smoother operation. Add these to your Claude Code settings (`.claude/settings.json` or project-level):
 
 ```json
 {
@@ -149,8 +175,6 @@ For uninterrupted operation, add allow rules to your Claude Code settings (`.cla
   }
 }
 ```
-
-Note that `--permission-mode acceptEdits` does **not** cover Bash commands — it only auto-approves file edits. There is currently no user-accessible permission mode that auto-approves Bash. The allow rules above are the only way to avoid per-command prompts. A built-in permission bypass via environment variable and `.lethe_config` is [planned](#configuration-via-environment-variables-and-lethe_config) for when Claude Code exposes this capability.
 
 **Without allow rules**, Lethe still works — you'll just confirm each step manually. This is practical for manual mode (`/lethe <session-id>`) but tedious during self-compaction where several commands fire in quick succession.
 
@@ -178,8 +202,9 @@ lethe/
 │   │   ├── example-cut-plan-with-sidecars.md  # Cut-plan + summary file examples
 │   │   └── example-splice-result.md     # Splice result with verification guide
 │   └── scripts/
-│       ├── lethe_utils.py               # Shared: JSONL parsing, chain walking, classification
+│       ├── lethe_utils.py               # Shared: JSONL parsing, chain walking, classification, config
 │       ├── lethe-analyze.py             # Structural analysis → segment manifest
+│       ├── lethe-config.py              # Permission configuration resolver
 │       ├── lethe-discover.py            # Session discovery + terminal detection
 │       └── lethe-splice.py              # Cut-plan → re-synthesized JSONL
 └── docs/                                # Design documents and review history
@@ -196,21 +221,18 @@ The rules table currently uses a single default mode. Two additional modes are p
 | `--strict` | Aggressive Trim → Always Drop, Moderate Trim → Aggressive Trim. Maximum space recovery. |
 | `--relaxed` | Aggressive Trim → Moderate Trim, Evaluate → KEEP (skip reading). Faster, preserves more. |
 
-### Configuration via environment variables and `.lethe_config`
+### Additional configuration keys
 
-Lethe will read configuration from environment variables and an optional `.lethe_config` file (project root or home directory), enabling:
+The `.lethe_config` infrastructure is in place (see [Permissions](#permissions)). Additional config keys are planned:
 
 | Setting | Env var | Description |
 |---|---|---|
 | Compaction mode | `LETHE_MODE` | `default`, `strict`, or `relaxed` |
-| Permission bypass | `LETHE_BYPASS_PERMISSIONS` | Skip Bash confirmation prompts when Claude Code adds user-accessible support |
 | Dry run | `LETHE_DRY_RUN` | Run analyze + decide, preview the cut-plan, but don't splice |
 | Skip backups | `LETHE_NO_BACKUP` | Don't create `.bak` files (splicer already supports this internally) |
 | Context threshold | `LETHE_CONTEXT_THRESHOLD` | Override the 70% proactive trigger (e.g., `80`) |
 | Preserve thinking | `LETHE_PRESERVE_THINKING` | Override Always Drop for thinking blocks |
 | Minimum segments | `LETHE_MIN_SEGMENTS` | Don't compact sessions with fewer segments than this |
-
-The `.lethe_config` file will use the same keys without the `LETHE_` prefix. Environment variables take precedence over file config.
 
 ### Targeted range compaction
 
@@ -225,6 +247,10 @@ This enables precise surgical cuts — e.g., compacting a long debugging sequenc
 ### Session multiplexer support
 
 Use `screen` or `tmux` instead of opening a new terminal window for the compactor and resumed sessions. Avoids desktop popups during autonomous or headless operation.
+
+### Keep recent messages (`--keep-recent N`)
+
+Preserve the most recent N messages during compaction, regardless of classification rules. Useful for keeping your immediate working context intact while still compacting older segments.
 
 ### Resume model selection
 
