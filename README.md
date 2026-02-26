@@ -125,6 +125,35 @@ Lethe auto-detects your terminal emulator by walking the process tree. Supported
 
 If your terminal isn't detected, Lethe falls back to printing a manual `claude --resume` command.
 
+## Permissions
+
+Lethe operates entirely through Bash commands — every Python script invocation, process signal, and file write goes through Claude Code's Bash tool. By default, Claude Code prompts for user confirmation on each Bash call. This means you'll be asked to approve every `python3`, `kill`, `mkdir`, etc. individually.
+
+For uninterrupted operation, add allow rules to your Claude Code settings (`.claude/settings.json` or project-level):
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 *lethe-*.py*)",
+      "Bash(python3 -c *uuid*)",
+      "Bash(mkdir -p /tmp/lethe/*)",
+      "Bash(cat > /tmp/lethe/*)",
+      "Bash(chmod +x /tmp/lethe/*)",
+      "Bash(uuidgen*)",
+      "Bash(ps -o *)",
+      "Bash(kill *)",
+      "Bash(nohup *)",
+      "Bash(disown*)"
+    ]
+  }
+}
+```
+
+Note that `--permission-mode acceptEdits` does **not** cover Bash commands — it only auto-approves file edits. There is currently no user-accessible permission mode that auto-approves Bash. The allow rules above are the only way to avoid per-command prompts. A built-in permission bypass via environment variable and `.lethe_config` is [planned](#configuration-via-environment-variables-and-lethe_config) for when Claude Code exposes this capability.
+
+**Without allow rules**, Lethe still works — you'll just confirm each step manually. This is practical for manual mode (`/lethe <session-id>`) but tedious during self-compaction where several commands fire in quick succession.
+
 ## Safety
 
 - **Atomic writes** — New JSONL is written to a temp file, fsynced, then renamed over the original. No partial writes.
@@ -155,6 +184,51 @@ lethe/
 │       └── lethe-splice.py              # Cut-plan → re-synthesized JSONL
 └── docs/                                # Design documents and review history
 ```
+
+## Planned Features
+
+### Compaction modes
+
+The rules table currently uses a single default mode. Two additional modes are planned:
+
+| Mode | Effect |
+|---|---|
+| `--strict` | Aggressive Trim → Always Drop, Moderate Trim → Aggressive Trim. Maximum space recovery. |
+| `--relaxed` | Aggressive Trim → Moderate Trim, Evaluate → KEEP (skip reading). Faster, preserves more. |
+
+### Configuration via environment variables and `.lethe_config`
+
+Lethe will read configuration from environment variables and an optional `.lethe_config` file (project root or home directory), enabling:
+
+| Setting | Env var | Description |
+|---|---|---|
+| Compaction mode | `LETHE_MODE` | `default`, `strict`, or `relaxed` |
+| Permission bypass | `LETHE_BYPASS_PERMISSIONS` | Skip Bash confirmation prompts when Claude Code adds user-accessible support |
+| Dry run | `LETHE_DRY_RUN` | Run analyze + decide, preview the cut-plan, but don't splice |
+| Skip backups | `LETHE_NO_BACKUP` | Don't create `.bak` files (splicer already supports this internally) |
+| Context threshold | `LETHE_CONTEXT_THRESHOLD` | Override the 70% proactive trigger (e.g., `80`) |
+| Preserve thinking | `LETHE_PRESERVE_THINKING` | Override Always Drop for thinking blocks |
+| Minimum segments | `LETHE_MIN_SEGMENTS` | Don't compact sessions with fewer segments than this |
+
+The `.lethe_config` file will use the same keys without the `LETHE_` prefix. Environment variables take precedence over file config.
+
+### Targeted range compaction
+
+Pass start/stop markers to compact only a specific section of the conversation rather than the full session. Optionally provide the replacement summary directly:
+
+```
+/lethe <session-id> --from <marker> --to <marker> --summary "Refactored auth module, switched from JWT to session tokens"
+```
+
+This enables precise surgical cuts — e.g., compacting a long debugging sequence mid-session without touching the surrounding context.
+
+### Session multiplexer support
+
+Use `screen` or `tmux` instead of opening a new terminal window for the compactor and resumed sessions. Avoids desktop popups during autonomous or headless operation.
+
+### Resume model selection
+
+Specify which Claude model the resumed session should use via env var (`LETHE_MODEL`), `.lethe_config`, or flag. Useful for resuming a session on a different model than the one that was compacted.
 
 ## Requirements
 
