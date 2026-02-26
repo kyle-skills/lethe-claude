@@ -36,10 +36,12 @@ from pathlib import Path
 
 from compact_utils import (
     BRIDGE_TYPES,
+    associate_non_chain_lines,
     build_segments,
     classify_entry,
     find_jsonl,
     get_content_blocks,
+    get_session_metadata,
     get_text_content,
     is_chain_entry,
     parse_jsonl,
@@ -60,47 +62,6 @@ KNOWN_TYPES = {
     "file-history-snapshot", "summary", "saved_hook_context",
     "queue-operation", "pr-link",
 }
-
-
-def associate_non_chain(lines: list[dict], segments: list[dict]) -> None:
-    """Assign non-chain entries to segments by line position."""
-    seg_ranges = [(s["line_range"][0], s["line_range"][1], s["id"]) for s in segments]
-    seg_by_id = {s["id"]: s for s in segments}
-
-    for i, entry in enumerate(lines):
-        if is_chain_entry(entry):
-            continue
-        assigned = False
-        for start, end, sid in seg_ranges:
-            if start <= i <= end:
-                seg_by_id[sid]["non_chain_lines"].append(i)
-                assigned = True
-                break
-        if not assigned:
-            for seg in reversed(segments):
-                if seg["line_range"][1] < i:
-                    seg["non_chain_lines"].append(i)
-                    break
-
-
-# ---------------------------------------------------------------------------
-# Splice logic
-# ---------------------------------------------------------------------------
-
-def get_session_metadata(lines: list[dict]) -> dict:
-    metadata = {"sessionId": None, "version": None, "cwd": None, "gitBranch": None}
-    for entry in lines:
-        if entry.get("sessionId") and not metadata["sessionId"]:
-            metadata["sessionId"] = entry["sessionId"]
-        if entry.get("version") and not metadata["version"]:
-            metadata["version"] = entry["version"]
-        if entry.get("cwd") and not metadata["cwd"]:
-            metadata["cwd"] = entry["cwd"]
-        if entry.get("gitBranch") and not metadata["gitBranch"]:
-            metadata["gitBranch"] = entry["gitBranch"]
-        if all(metadata.values()):
-            break
-    return metadata
 
 
 def make_summary_pair(
@@ -550,7 +511,7 @@ def main():
     # Walk chain and build segments
     chain = walk_chain(lines)
     segments = build_segments(chain)
-    associate_non_chain(lines, segments)
+    associate_non_chain_lines(lines, segments)
     metadata = get_session_metadata(lines)
     if not metadata.get("sessionId"):
         metadata["sessionId"] = args.session_id

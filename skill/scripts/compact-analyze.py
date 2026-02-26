@@ -25,8 +25,10 @@ import sys
 from pathlib import Path
 
 from compact_utils import (
+    associate_non_chain_lines,
     build_segments,
     find_jsonl,
+    get_session_metadata,
     get_text_content,
     is_chain_entry,
     parse_jsonl,
@@ -86,42 +88,6 @@ def identify_context_header(segments: list[dict]) -> None:
         segments[i]["type"] = "context_header"
 
 
-def associate_non_chain_lines(
-    lines: list[dict], segments: list[dict]
-) -> None:
-    """Associate non-chain entries with segments by line position."""
-    # Build line→segment mapping from chain entries
-    seg_ranges = []
-    for seg in segments:
-        seg_ranges.append((seg["line_range"][0], seg["line_range"][1], seg["id"]))
-
-    for seg in segments:
-        seg["non_chain_lines"] = []
-
-    # Find non-chain entries (0-indexed to match build_segments line ranges)
-    for i, entry in enumerate(lines):
-        if is_chain_entry(entry):
-            continue
-
-        # Find which segment this falls within
-        assigned = False
-        for start, end, seg_id in seg_ranges:
-            if start <= i <= end:
-                for seg in segments:
-                    if seg["id"] == seg_id:
-                        seg["non_chain_lines"].append(i)
-                        assigned = True
-                        break
-                break
-
-        # Entries between segments → assign to preceding segment
-        if not assigned:
-            for seg in reversed(segments):
-                if seg["line_range"][1] < i:
-                    seg["non_chain_lines"].append(i)
-                    break
-
-
 def build_content_preview(entries: list[tuple[int, dict]], max_len: int = 200) -> str:
     """Build a preview string from the first text content in entries."""
     for _, entry in entries:
@@ -164,21 +130,6 @@ def build_description(seg: dict) -> str:
         return f"Tool chain ({tool_str})"
 
     return stype
-
-
-def get_session_metadata(lines: list[dict]) -> dict:
-    """Extract session metadata from JSONL entries."""
-    metadata = {"cwd": None, "version": None, "gitBranch": None}
-    for entry in lines:
-        if entry.get("cwd") and not metadata["cwd"]:
-            metadata["cwd"] = entry["cwd"]
-        if entry.get("version") and not metadata["version"]:
-            metadata["version"] = entry["version"]
-        if entry.get("gitBranch") and not metadata["gitBranch"]:
-            metadata["gitBranch"] = entry["gitBranch"]
-        if all(metadata.values()):
-            break
-    return metadata
 
 
 def build_manifest(

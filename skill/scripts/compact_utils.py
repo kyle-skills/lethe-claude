@@ -393,3 +393,55 @@ def build_segments(chain: list[tuple[int, dict]]) -> list[dict]:
         segments.append(current_segment)
 
     return segments
+
+
+def associate_non_chain_lines(
+    lines: list[dict], segments: list[dict]
+) -> None:
+    """Assign non-chain entries to segments by line position.
+
+    Non-chain entries within a segment's line range are assigned to that segment.
+    Entries between segments are assigned to the preceding segment.
+    Entries before the first segment remain unassigned.
+    """
+    seg_ranges = [(s["line_range"][0], s["line_range"][1], s["id"]) for s in segments]
+    seg_by_id = {s["id"]: s for s in segments}
+
+    for seg in segments:
+        seg["non_chain_lines"] = []
+
+    for i, entry in enumerate(lines):
+        if is_chain_entry(entry):
+            continue
+        assigned = False
+        for start, end, sid in seg_ranges:
+            if start <= i <= end:
+                seg_by_id[sid]["non_chain_lines"].append(i)
+                assigned = True
+                break
+        if not assigned:
+            for seg in reversed(segments):
+                if seg["line_range"][1] < i:
+                    seg["non_chain_lines"].append(i)
+                    break
+
+
+def get_session_metadata(lines: list[dict]) -> dict:
+    """Extract session metadata from JSONL entries.
+
+    Returns dict with sessionId, cwd, version, gitBranch.
+    Not all fields may be present — callers should use .get() for optional fields.
+    """
+    metadata = {"sessionId": None, "cwd": None, "version": None, "gitBranch": None}
+    for entry in lines:
+        if entry.get("sessionId") and not metadata["sessionId"]:
+            metadata["sessionId"] = entry["sessionId"]
+        if entry.get("cwd") and not metadata["cwd"]:
+            metadata["cwd"] = entry["cwd"]
+        if entry.get("version") and not metadata["version"]:
+            metadata["version"] = entry["version"]
+        if entry.get("gitBranch") and not metadata["gitBranch"]:
+            metadata["gitBranch"] = entry["gitBranch"]
+        if all(metadata.values()):
+            break
+    return metadata
