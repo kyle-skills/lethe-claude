@@ -1,0 +1,5 @@
+{
+  "name": "smart-compact",
+  "description": "Intelligent JSONL compaction for Claude Code sessions",
+  "version": "0.1.0"
+}
