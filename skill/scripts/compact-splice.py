@@ -135,6 +135,7 @@ def load_cut_plan(path: str) -> dict:
     for action in plan["actions"]:
         if "segment_id" not in action:
             raise ValueError(f"Action missing 'segment_id': {action}")
+        action["segment_id"] = int(action["segment_id"])
         if action.get("action") not in ("keep", "drop", "summarize"):
             raise ValueError(
                 f"Invalid action '{action.get('action')}' for segment {action['segment_id']}"
