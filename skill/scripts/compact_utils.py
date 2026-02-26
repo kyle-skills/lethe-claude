@@ -108,7 +108,9 @@ def walk_chain(lines: list[dict]) -> list[tuple[int, dict]]:
     for i, entry in enumerate(lines):
         u = entry.get("uuid")
         if u and not is_chain_entry(entry) and entry.get("type") in BRIDGE_TYPES:
-            bridge_entries.setdefault(u, []).append((i, entry["parentUuid"]))
+            parent = entry.get("parentUuid")
+            if parent is not None:
+                bridge_entries.setdefault(u, []).append((i, parent))
 
     # Find leaf (last non-sidechain chain entry by line position)
     leaf_uuid = None
@@ -212,7 +214,9 @@ def classify_entry(entry: dict, preceding_tool_type: str | None) -> str:
         subtype = entry.get("subtype")
         if subtype == "compact_boundary":
             return "boundary"
-        # Other chain-participating system subtypes are metadata (droppable)
+        # Other chain-participating system subtypes are metadata (droppable).
+        # microcompact_boundary: internal optimization markers with no summary
+        # content — classified as progress (Always Drop). See rules.md.
         if subtype in CHAIN_SYSTEM_SUBTYPES:
             return "progress"
 
@@ -237,7 +241,7 @@ def classify_entry(entry: dict, preceding_tool_type: str | None) -> str:
                     tool_types.add("task_result")
                 else:
                     tool_types.add("tool_chain")
-            # Most conservative wins: mcp_chain > task_result > tool_chain
+            # Priority: mcp_chain > task_result > tool_chain (most specific wins)
             if "mcp_chain" in tool_types:
                 return "mcp_chain"
             if "task_result" in tool_types:
