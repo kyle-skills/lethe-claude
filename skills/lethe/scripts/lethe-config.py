@@ -34,9 +34,28 @@ def main():
         default=None,
         help="Project root directory for project-level .lethe_config lookup",
     )
+    parser.add_argument(
+        "--fallback-compactor-permission",
+        default=None,
+        help="Caller fallback for compactor_permission (below env/config)",
+    )
+    parser.add_argument(
+        "--fallback-resume-permission",
+        default=None,
+        help="Caller fallback for resume_permission (below env/config)",
+    )
 
     args = parser.parse_args()
-    config = resolve_config(project_dir=args.project_dir)
+    caller_overrides = {}
+    if args.fallback_compactor_permission:
+        caller_overrides["compactor_permission"] = args.fallback_compactor_permission
+    if args.fallback_resume_permission:
+        caller_overrides["resume_permission"] = args.fallback_resume_permission
+
+    config = resolve_config(
+        project_dir=args.project_dir,
+        caller_overrides=caller_overrides or None,
+    )
     print(json.dumps(config, indent=2))
     sys.exit(0)
 

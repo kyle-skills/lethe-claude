@@ -6,7 +6,7 @@ description: >-
   "compact my context", "trim my conversation", or when running as a
   compactor with a SESSION_ID argument. Can also be used proactively when
   context usage exceeds 70% and autonomous compaction is permitted.
-version: 1.1.0
+version: 1.2.0
 ---
 
 <sections>

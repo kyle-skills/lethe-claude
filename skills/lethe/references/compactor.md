@@ -1,4 +1,4 @@
-<skill name="lethe-compactor" version="1.1">
+<skill name="lethe-compactor" version="1.2">
 
 <metadata>
 type: reference
@@ -31,6 +31,11 @@ $SESSION_ID                          — Required. Target session to compact.
                                        then relaunches after splice.
                                        RESUME_PROMPT is optional within --orchestrate.
                                        If omitted, session resumes with no initial prompt.
+--fallback-resume-permission MODE    — Optional. Caller-provided fallback for the
+                                       resumed session's --permission-mode. Only used
+                                       when no env var or .lethe_config specifies
+                                       resume_permission. Intended for orchestration
+                                       callers (e.g., Souffleur).
 ```
 
 Parse these from the skill invocation arguments:
@@ -38,6 +43,7 @@ Parse these from the skill invocation arguments:
 - If present, `--project-slug` takes one value (`PROJECT_SLUG`).
 - If `--orchestrate` follows: next token is PID, remainder is RESUME_PROMPT
   (may be empty).
+- If `--fallback-resume-permission` follows: next token is MODE.
 If only SESSION_ID is provided, skip Phase 1 and begin at Phase 2.
 
 When `--orchestrate` is not provided, the target session must already be
@@ -222,9 +228,14 @@ Do not mix sections. Execute exactly one.
 
 Before branching into Section A or B, resolve permission configuration:
 ```bash
-python3 scripts/lethe-config.py --project-dir <cwd>
+python3 scripts/lethe-config.py --project-dir <cwd> [--fallback-resume-permission <MODE>]
 ```
 where `<cwd>` is from the Phase 2 manifest metadata (or `INITIAL_CWD` fallback).
+Include `--fallback-resume-permission` only when the compactor received
+`--fallback-resume-permission` in its own arguments. This passes the caller's
+suggestion as lowest-priority fallback — env vars and .lethe_config files always
+take precedence over caller-provided values.
+
 Parse the JSON output and extract `resume_permission`.
 If `resume_permission` is null, omit `--permission-mode` from all relaunch/resume
 commands below. If non-null, include `--permission-mode <resume_permission>`.
@@ -254,6 +265,7 @@ commands below. If non-null, include `--permission-mode <resume_permission>`.
    DELIM="RELAUNCH_$(uuidgen | tr -d '-')"
    cat > /tmp/lethe/$SESSION_ID/relaunch.sh << "$DELIM"
    #!/bin/bash
+   echo $$ > /tmp/lethe/<session-id>/claude.pid
    exec env -u CLAUDECODE claude [--permission-mode <resume_permission>] --resume <session-id> "<resume-prompt>"
    $DELIM
    chmod +x /tmp/lethe/$SESSION_ID/relaunch.sh
@@ -273,10 +285,20 @@ commands below. If non-null, include `--permission-mode <resume_permission>`.
    ```
    `env -u CLAUDECODE` prevents nested session conflicts.
 5. `disown` the background process.
-6. The working directory at `/tmp/lethe/$SESSION_ID/` is ephemeral
+6. Wait briefly for the launched session to start and write its PID:
+   ```bash
+   for i in $(seq 1 5); do sleep 1; [ -f /tmp/lethe/$SESSION_ID/claude.pid ] && break; done
+   LAUNCHED_PID=$(cat /tmp/lethe/$SESSION_ID/claude.pid 2>/dev/null || echo "unknown")
+   ```
+7. Output compaction results and launched PID:
+   "Session $SESSION_ID compacted and relaunched.
+   Reduction: [original_tokens_est] → [new_tokens_est] tokens ([reduction_pct]%).
+   Segments: [kept] kept, [summarized] summarized, [dropped] dropped.
+   Launched PID: $LAUNCHED_PID"
+8. The working directory at `/tmp/lethe/$SESSION_ID/` is ephemeral
    and will be cleaned up on system reboot. Do not delete it — the relaunch
    script may still be in use.
-7. Exit. The compactor's job is done.
+9. Exit. The compactor's job is done.
 
 ### Section B: User Prompt (--orchestrate NOT provided)
 
@@ -305,6 +327,7 @@ commands below. If non-null, include `--permission-mode <resume_permission>`.
    DELIM="RESUME_$(uuidgen | tr -d '-')"
    cat > /tmp/lethe/$SESSION_ID/resume.sh << "$DELIM"
    #!/bin/bash
+   echo $$ > /tmp/lethe/<session-id>/claude.pid
    exec env -u CLAUDECODE claude [--permission-mode <resume_permission>] --resume <session-id>
    $DELIM
    chmod +x /tmp/lethe/$SESSION_ID/resume.sh
@@ -318,7 +341,13 @@ commands below. If non-null, include `--permission-mode <resume_permission>`.
    nohup <terminal_launch with {command} replaced> > /dev/null 2>&1 &
    ```
    followed by `disown`.
-7. The working directory at `/tmp/lethe/$SESSION_ID/` will be cleaned
+7. Wait briefly for the launched session to start and write its PID:
+   ```bash
+   for i in $(seq 1 5); do sleep 1; [ -f /tmp/lethe/$SESSION_ID/claude.pid ] && break; done
+   LAUNCHED_PID=$(cat /tmp/lethe/$SESSION_ID/claude.pid 2>/dev/null || echo "unknown")
+   ```
+8. Output: "Launched PID: $LAUNCHED_PID"
+9. The working directory at `/tmp/lethe/$SESSION_ID/` will be cleaned
    up on system reboot.
 </core>
 </section>

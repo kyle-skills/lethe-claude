@@ -548,14 +548,18 @@ _CONFIG_DEFAULTS = {
 }
 
 
-def resolve_config(project_dir: str | None = None) -> dict:
-    """Resolve Lethe permission configuration from env vars and config files.
+def resolve_config(project_dir: str | None = None, caller_overrides: dict | None = None) -> dict:
+    """Resolve Lethe permission configuration.
 
     Resolution order (per key, first match wins):
     1. Environment variable (LETHE_COMPACTOR_PERMISSION, LETHE_RESUME_PERMISSION)
     2. Project-level .lethe_config (in project_dir)
     3. User-level .lethe_config (in $HOME)
-    4. Hardcoded default (acceptEdits for compactor, None for resume)
+    4. Caller-provided fallbacks (lowest priority, below all user config)
+    5. Hardcoded default (acceptEdits for compactor, None for resume)
+
+    Caller overrides are intended for orchestration systems (e.g., Souffleur)
+    that pass a suggested permission mode. They never override user config.
 
     Returns: {"compactor_permission": str, "resume_permission": str | None}
     """
@@ -598,7 +602,18 @@ def resolve_config(project_dir: str | None = None) -> dict:
                 result[key] = validated
                 resolved.add(key)
 
-    # 4. Apply defaults for any still-unresolved keys
+    # 4. Caller-provided fallbacks (below all user config)
+    if caller_overrides:
+        for key in _CONFIG_KEYS:
+            if key not in resolved and key in caller_overrides:
+                raw = caller_overrides[key]
+                if raw:
+                    validated = _validate_permission(key, raw)
+                    if validated is not None:
+                        result[key] = validated
+                        resolved.add(key)
+
+    # 5. Apply defaults for any still-unresolved keys
     for key in _CONFIG_KEYS:
         if key not in resolved:
             result[key] = _CONFIG_DEFAULTS[key]
