@@ -33,6 +33,10 @@ $SESSION_ID                          — Required. Target session to compact.
 
 Parse these from the skill invocation arguments. If only SESSION_ID is provided,
 skip Phase 1 entirely and begin at Phase 2.
+
+When `--orchestrate` is not provided, the target session must already be
+stopped. Compacting a live session risks data loss — entries written after
+the read but before the atomic rename are silently overwritten.
 </core>
 </section>
 
@@ -76,9 +80,13 @@ Skip this phase entirely if --orchestrate was not provided. Proceed to Phase 2.
 
 1. Run structural analysis:
    ```bash
-   python3 scripts/compact-analyze.py $SESSION_ID
+   mkdir -p /tmp/smart-compact/$SESSION_ID
+   python3 scripts/compact-analyze.py $SESSION_ID \
+     --output /tmp/smart-compact/$SESSION_ID/manifest.json
    ```
-2. Capture the JSON manifest output.
+   If the discovery output from self-compaction included a `project_slug`,
+   pass it: `--project-slug $PROJECT_SLUG` for faster JSONL discovery.
+2. Read the manifest from `/tmp/smart-compact/$SESSION_ID/manifest.json`.
 3. Review the manifest summary: total segments, total estimated tokens,
    segment type distribution.
 
@@ -167,6 +175,7 @@ Summary length targets by trim level:
    python3 scripts/compact-splice.py $SESSION_ID \
      --cut-plan /tmp/smart-compact/$SESSION_ID/cut-plan.json
    ```
+   If `project_slug` is available, pass `--project-slug $PROJECT_SLUG`.
 2. Parse the result JSON from stdout.
 3. Verify the result shows `"ok": true` and `chain_verification.ok: true`.
 4. Record the reduction stats for reporting:
@@ -201,27 +210,30 @@ Do not mix sections. Execute exactly one.
 1. Retrieve `cwd` from the Phase 2 manifest metadata.
 2. Detect the terminal for relaunch:
    ```bash
-   python3 scripts/compact-discover.py --detect-terminal $$
+   python3 scripts/compact-discover.py --detect-terminal $$ --cwd <cwd>
    ```
+   where `<cwd>` is the value retrieved from manifest metadata in step 1.
    Parse the JSON output: extract `terminal` and `terminal_launch`.
    If `terminal` is null, fall back to outputting the manual resume command
    and stop.
 3. Build a launch script to avoid nested quoting:
    ```bash
-   cat > /tmp/smart-compact/$SESSION_ID/relaunch.sh << 'RELAUNCH_EOF'
+   DELIM="RELAUNCH_$(uuidgen | tr -d '-')"
+   cat > /tmp/smart-compact/$SESSION_ID/relaunch.sh << "$DELIM"
    #!/bin/bash
-   exec env -u CLAUDECODE claude --resume <session-id> <resume-prompt>
-   RELAUNCH_EOF
+   exec env -u CLAUDECODE claude --resume <session-id> "<resume-prompt>"
+   $DELIM
    chmod +x /tmp/smart-compact/$SESSION_ID/relaunch.sh
    ```
    Substitute `<session-id>` and `<resume-prompt>` with actual values in the
-   heredoc content. If RESUME_PROMPT was not provided, omit it from the
-   `claude --resume` command.
-   Replace `{cwd}` with the `cwd` value from Phase 2 manifest metadata, and
-   `{command}` with the relaunch script path in the terminal launch template.
-4. Launch via the terminal template:
+   heredoc content. The resume prompt must be double-quoted in the exec line.
+   If RESUME_PROMPT was not provided, omit it from the `claude --resume` command.
+   The UUID-based heredoc delimiter prevents injection if the resume prompt
+   contains a delimiter string.
+4. Replace `{command}` in `terminal_launch` with the relaunch script path.
+   Launch via the terminal template:
    ```bash
-   nohup <terminal_launch with {command} replaced by /tmp/smart-compact/$SESSION_ID/relaunch.sh> > /dev/null 2>&1 &
+   nohup <terminal_launch with {command} replaced> > /dev/null 2>&1 &
    ```
    `env -u CLAUDECODE` prevents nested session conflicts.
 5. `disown` the background process.
@@ -236,23 +248,35 @@ Do not mix sections. Execute exactly one.
    "Session $SESSION_ID compacted successfully.
    Reduction: [original_tokens_est] → [new_tokens_est] tokens ([reduction_pct]%).
    Segments: [kept] kept, [summarized] summarized, [dropped] dropped."
-2. Ask the user: "Launch the resumed session?"
-   - If yes: detect terminal via
-     `python3 scripts/compact-discover.py --detect-terminal $$`
-     Build a launch script:
-     ```bash
-     cat > /tmp/smart-compact/$SESSION_ID/resume.sh << 'RESUME_EOF'
-     #!/bin/bash
-     exec env -u CLAUDECODE claude --resume <session-id>
-     RESUME_EOF
-     chmod +x /tmp/smart-compact/$SESSION_ID/resume.sh
-     ```
-     `env -u CLAUDECODE` prevents nested session conflicts when Claude Code
-     detects an existing parent session.
-     Then launch via: `nohup <terminal_launch> > /dev/null 2>&1 &`
-     followed by `disown`.
-   - If no: output the manual command: `claude --resume $SESSION_ID`
-3. The working directory at `/tmp/smart-compact/$SESSION_ID/` will be cleaned
+2. Ask the user: "Launch the resumed session in a new terminal?"
+   - If no: output the manual command: `claude --resume $SESSION_ID` and stop.
+   - If yes: continue to step 3.
+3. Retrieve `cwd` from the Phase 2 manifest metadata.
+4. Detect the terminal for relaunch:
+   ```bash
+   python3 scripts/compact-discover.py --detect-terminal $$ --cwd <cwd>
+   ```
+   Parse the JSON output: extract `terminal` and `terminal_launch`.
+   If `terminal` is null, output the manual command:
+   `claude --resume $SESSION_ID` and stop.
+5. Build a launch script to avoid nested quoting:
+   ```bash
+   DELIM="RESUME_$(uuidgen | tr -d '-')"
+   cat > /tmp/smart-compact/$SESSION_ID/resume.sh << "$DELIM"
+   #!/bin/bash
+   exec env -u CLAUDECODE claude --resume <session-id>
+   $DELIM
+   chmod +x /tmp/smart-compact/$SESSION_ID/resume.sh
+   ```
+   Substitute `<session-id>` with the actual session ID.
+   `env -u CLAUDECODE` prevents nested session conflicts.
+6. Launch via the terminal template. Replace `{command}` in `terminal_launch`
+   with `/tmp/smart-compact/$SESSION_ID/resume.sh`:
+   ```bash
+   nohup <terminal_launch with {command} replaced> > /dev/null 2>&1 &
+   ```
+   followed by `disown`.
+7. The working directory at `/tmp/smart-compact/$SESSION_ID/` will be cleaned
    up on system reboot.
 </core>
 </section>
