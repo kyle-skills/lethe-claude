@@ -8,7 +8,7 @@ description: >-
   explicit user confirmation is obtained first. Performs intelligent,
   segment-level JSONL compaction that preserves critical context while
   surgically removing tool output bloat, thinking blocks, and stale exploration.
-version: 1.0
+version: 1.0.0
 ---
 
 <sections>
@@ -26,6 +26,26 @@ semantic KEEP/SUMMARIZE/DROP decisions per segment using centralized rules.
 Two modes: self-compaction (no arguments) and compactor (with SESSION_ID).
 Do not run multiple compactions on the same session simultaneously.
 </context>
+
+<reference path="references/compactor.md" load="required">
+Compactor protocol — full phase-by-phase instructions for orchestrated compaction.
+</reference>
+
+<reference path="references/rules.md" load="required">
+Compaction rules — segment type mapping, trim levels, evaluation guidance.
+</reference>
+
+<reference path="examples/example-segment-manifest.md" load="recommended">
+Example manifest JSON with field reading guide.
+</reference>
+
+<reference path="examples/example-cut-plan-with-sidecars.md" load="recommended">
+Example cut-plan with sidecar summary files.
+</reference>
+
+<reference path="examples/example-splice-result.md" load="recommended">
+Example splice result JSON with verification field reading guide.
+</reference>
 
 <guidance>
 Script paths in this skill (e.g., `scripts/compact-discover.py`) are relative to
@@ -70,11 +90,12 @@ self-compaction mode only and do not apply when operating as a compactor.
 8. Build a launch script to avoid nested quoting issues:
    ```bash
    mkdir -p /tmp/smart-compact/<session_id>
-   cat > /tmp/smart-compact/<session_id>/launch.sh << 'LAUNCH_EOF'
+   DELIM="LAUNCH_$(uuidgen | tr -d '-')"
+   cat > /tmp/smart-compact/<session_id>/launch.sh << "$DELIM"
    #!/bin/bash
    exec env -u CLAUDECODE claude --permission-mode acceptEdits \
      "/smart-compact <session_id> --orchestrate <claude_pid> '<resume_prompt>'"
-   LAUNCH_EOF
+   $DELIM
    chmod +x /tmp/smart-compact/<session_id>/launch.sh
    ```
    Substitute `<session_id>`, `<claude_pid>`, and `<resume_prompt>` with actual
@@ -92,8 +113,10 @@ self-compaction mode only and do not apply when operating as a compactor.
    If the launch command fails, report the error and provide the manual command:
    `claude "/smart-compact <session_id>"`
 9. Output: "Compaction launched. This session will be terminated shortly."
-10. STOP — do not generate any further responses or tool calls. The compactor
-    will terminate this session. Do not proceed with any other work.
+10. Use AskUserQuestion to block: ask "Compaction in progress — this session
+    will be terminated by the compactor shortly. Do not continue."
+    This creates a blocking wait that prevents further output while the
+    compactor kills this session.
 </core>
 </section>
 
