@@ -83,6 +83,44 @@ def parse_jsonl(path: Path) -> list[dict]:
     return lines
 
 
+def resolve_summary_file_path(
+    summary_file: str,
+    session_id: str,
+    base_dir: Path | None = None,
+) -> Path:
+    """Resolve and validate a summary sidecar path.
+
+    The resolved file must exist and be located under:
+        /tmp/lethe/<session_id>/
+
+    The check is performed on canonical paths, which prevents traversal via
+    ".." and symlink escapes.
+    """
+    if not isinstance(summary_file, str) or not summary_file.strip():
+        raise ValueError("Summary file path must be a non-empty string")
+
+    candidate = Path(summary_file)
+    if not candidate.is_absolute():
+        raise ValueError(f"Summary file {summary_file} must be an absolute path")
+
+    root = Path("/tmp/lethe") if base_dir is None else Path(base_dir)
+    session_dir = (root / session_id).resolve()
+
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as e:
+        raise ValueError(f"Cannot read summary file {summary_file}: {e}") from e
+
+    if session_dir not in resolved.parents:
+        raise ValueError(
+            f"Summary file {summary_file} must be under {session_dir}/"
+        )
+    if not resolved.is_file():
+        raise ValueError(f"Summary file {summary_file} is not a regular file")
+
+    return resolved
+
+
 def is_chain_entry(entry: dict) -> bool:
     """Check if an entry participates in the parentUuid chain."""
     if "uuid" not in entry:
@@ -134,23 +172,36 @@ def walk_chain(lines: list[dict]) -> list[tuple[int, dict]]:
             if parent is not None:
                 bridge_entries.setdefault(u, []).append((i, parent))
 
-    # Find leaf (last non-sidechain chain entry by line position)
+    # Find leaf (prefer non-sidechain; fallback to sidechain-only sessions)
     leaf_uuid = None
+    used_sidechain_leaf = False
     for entry in reversed(lines):
         u = entry.get("uuid")
-        if u and is_chain_entry(entry) and not entry.get("isSidechain"):
+        if not u or not is_chain_entry(entry):
+            continue
+        if not entry.get("isSidechain"):
             leaf_uuid = u
+            used_sidechain_leaf = False
             break
+        if leaf_uuid is None:
+            leaf_uuid = u
+            used_sidechain_leaf = True
 
     if not leaf_uuid:
         raise ValueError("No chain entries found in JSONL")
+    if used_sidechain_leaf:
+        print(
+            "Warning: no non-sidechain leaf found; using sidechain chain head",
+            file=sys.stderr,
+        )
 
     # Walk backwards from leaf, bridging through non-chain entries
     chain = []
     current = leaf_uuid
     referrer_pos = len(lines)  # position of entry that referenced current as parent
 
-    for _ in range(len(lines)):  # safety limit prevents infinite loops
+    max_steps = len(lines) + 1  # +1 lets a valid root parent=None terminate cleanly
+    for _ in range(max_steps):  # safety limit prevents infinite loops
         if current is None:
             break
 
@@ -178,7 +229,7 @@ def walk_chain(lines: list[dict]) -> list[tuple[int, dict]]:
             break
     else:
         # Safety limit exhausted — likely a cycle in parentUuid references
-        print(f"Warning: chain walk hit safety limit ({len(lines)} iterations) — possible cycle in parentUuid chain", file=sys.stderr)
+        print(f"Warning: chain walk hit safety limit ({max_steps} iterations) — possible cycle in parentUuid chain", file=sys.stderr)
 
     chain.reverse()
 

@@ -183,9 +183,22 @@ Note that `--permission-mode acceptEdits` does **not** cover Bash commands — i
 - **Atomic writes** — New JSONL is written to a temp file, fsynced, then renamed over the original. No partial writes.
 - **Timestamped backups** — The original JSONL is copied to a `.bak-YYYYMMDD-HHMMSS-xxxx` file before overwrite.
 - **Chain verification** — After splicing, Lethe walks the new chain and verifies: all kept UUIDs are reachable, all summaries are present, no dropped entries leaked through, and turn alternation is intact. If verification fails, the original is not overwritten.
+- **Summary sidecar validation** — Summary file paths must be absolute, resolve to a regular file, and be located under the session's `/tmp/lethe/<session_id>/` directory. Relative paths, symlink escapes, `..` traversal, directories, and device nodes are all rejected.
+- **Cut-plan input hardening** — The splicer validates cut-plan structure before execution: required fields, unique segment IDs, action allowlist (`keep`/`drop`/`summarize`), and mandatory `summary_file` for summarize actions.
+- **Cut-plan coverage guardrail** — If the cut-plan covers less than 50% of segments, the splice aborts. Missing segments default to keep — a data-preserving fail-safe.
+- **Re-compaction safe** — Summary verification counts only newly generated summary UUIDs, avoiding false failures when re-compacting sessions that already contain `[lethe summary]` markers from prior runs.
 - **Unknown type safety** — If the JSONL contains entry types that Lethe doesn't recognize, it aborts rather than risk data corruption.
+- **Permission fail-safe** — Invalid permission configuration values produce a warning and fall back to safe defaults. Misconfiguration never silently escalates permissions.
 - **Graceful kill** — SIGTERM first, 10-second grace period for buffer flush, SIGKILL only as last resort.
 - **Idempotent** — Safe to run on sessions already compacted by `/compact` or by Lethe itself. Prior summaries are preserved, not re-summarized.
+
+### Testing
+
+The Python scripts (analysis, chain walking, classification, splicing) have been validated against live Claude Code session data:
+
+- **lethe-analyze.py** — 1,984 / 2,073 live JSONL files in `~/.claude/projects/` parsed and analyzed successfully (89 snapshot-only files with no chain entries were correctly rejected).
+- **lethe-splice.py** — 18-file in-place verification subset: splice, chain walk, and integrity check all passing.
+- **Unit tests** — 34 tests covering config resolution, chain walking, sidechain handling, path validation, and CLI behavior.
 
 ## Project Structure
 
@@ -207,6 +220,9 @@ lethe/
 │       ├── lethe-config.py              # Permission configuration resolver
 │       ├── lethe-discover.py            # Session discovery + terminal detection
 │       └── lethe-splice.py              # Cut-plan → re-synthesized JSONL
+├── tests/                               # Unit and integration tests
+│   ├── test_config.py                   # Permission config resolution tests
+│   └── test_chain_and_splice.py         # Chain walking, sidechain, path validation tests
 └── docs/                                # Design documents and review history
 ```
 

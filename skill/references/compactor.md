@@ -1,4 +1,4 @@
-<skill name="lethe-compactor" version="1.0">
+<skill name="lethe-compactor" version="1.1">
 
 <metadata>
 type: reference

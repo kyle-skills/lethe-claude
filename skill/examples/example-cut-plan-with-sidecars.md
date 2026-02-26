@@ -1,4 +1,4 @@
-<skill name="lethe-example-cut-plan" version="1.0">
+<skill name="lethe-example-cut-plan" version="1.1">
 
 <metadata>
 type: example

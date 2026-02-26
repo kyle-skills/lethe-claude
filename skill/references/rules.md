@@ -1,4 +1,4 @@
-<skill name="lethe-rules" version="1.0">
+<skill name="lethe-rules" version="1.1">
 
 <metadata>
 type: reference

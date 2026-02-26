@@ -48,6 +48,7 @@ from lethe_utils import (
     get_text_content,
     is_chain_entry,
     parse_jsonl,
+    resolve_summary_file_path,
     walk_chain,
 )
 
@@ -283,15 +284,14 @@ def build_new_jsonl(
 
             # Read summary from sidecar file
             summary_file = action_info.get("summary_file", "")
-            # Validate path is under expected directory
-            if session_id:
-                expected_prefix = f"/tmp/lethe/{session_id}/"
-                if not summary_file.startswith(expected_prefix):
-                    raise ValueError(f"Summary file {summary_file} must be under {expected_prefix}")
             try:
-                summary_text = Path(summary_file).read_text().strip()
-            except (OSError, FileNotFoundError) as e:
-                raise ValueError(f"Cannot read summary file {summary_file}: {e}")
+                if session_id:
+                    summary_path = resolve_summary_file_path(summary_file, session_id)
+                else:
+                    summary_path = Path(summary_file).resolve(strict=True)
+                summary_text = summary_path.read_text(encoding="utf-8").strip()
+            except OSError as e:
+                raise ValueError(f"Cannot read summary file {summary_file}: {e}") from e
             if not summary_text:
                 raise ValueError(f"Summary file {summary_file} is empty")
 
@@ -395,7 +395,7 @@ def verify_new_chain(
         1 for seg in segments
         if action_map.get(seg["id"], {}).get("action") == "summarize"
     )
-    if generated_summary_uuids:
+    if generated_summary_uuids is not None:
         actual_summaries = sum(
             1 for _, entry in new_chain
             if entry.get("uuid") in generated_summary_uuids
