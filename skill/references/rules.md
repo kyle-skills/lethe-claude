@@ -1,8 +1,8 @@
-<skill name="smart-compact-rules" version="1.0">
+<skill name="lethe-rules" version="1.0">
 
 <metadata>
 type: reference
-parent-skill: smart-compact
+parent-skill: lethe
 tier: 3
 protocol: Compaction Rules
 </metadata>
@@ -27,15 +27,16 @@ protocol: Compaction Rules
 
 ## Segment Type to Rule Mapping
 
-Positional rules (marked **Positional**) are checked first regardless of type,
-except for Always Drop types (thinking, progress) which are always dropped
-even in positional positions.
-Then apply type-based rules in table order.
+Rule precedence (applied in this order):
+1. **Always Drop**: Mark thinking and progress segments DROP regardless of position.
+2. **Positional rules**: Apply context_header (Always Keep) and final segment (Always Keep).
+   The "final segment" is the last segment that is NOT an Always Drop type.
+3. **Type-based rules**: Look up remaining segments in the table below.
 
 | Segment Type | Default Rule | Notes |
 |---|---|---|
-| `context_header` | Always Keep | **Positional**: first segment — session identity |
-| (final segment) | Always Keep | **Positional**: last assistant response before compaction |
+| `context_header` | Always Keep | **Positional**: first segment(s) — session identity |
+| (final segment) | Always Keep | **Positional**: last non-Always-Drop segment |
 | `boundary` | Always Keep | Existing compact boundaries from prior runs |
 | `thinking` | Always Drop | Internal reasoning, never needed on resume |
 | `progress` | Always Drop | Streaming markers, no content |
@@ -45,16 +46,15 @@ Then apply type-based rules in table order.
 | `tool_chain` (Edit/Write) | Moderate Trim | Preserve what changed and why |
 | `tool_chain` (Bash, all others) | Aggressive Trim | Summarize command and exit status |
 | `task_result` | Aggressive Trim | Subagent results, keep outcome only |
-| `git_diff` | Aggressive Trim | Summarize files + nature of changes |
+| `git_diff` | Aggressive Trim | Summarize files + nature of changes. Diffs from MCP tools are classified as `mcp_chain` instead. |
 | `conversation` | Evaluate | May be critical decisions or casual chat |
 
-To determine the tool sub-type for `tool_chain` segments, check the `tool_names`
-field in the segment manifest. If the segment contains multiple tool types,
+Tool sub-type is determined by the `tool_names` field in the segment manifest.
+Tool names are literal Claude Code tool names (e.g., `Read`, `Edit`, `Bash`,
+`Grep`, `Glob`, `Write`, `Task`). If the segment contains multiple tool types,
 use the most conservative rule (Moderate Trim over Aggressive Trim).
-
-`tool_chain` sub-type is determined by the `tool_names` field in the segment
-manifest. Tools not explicitly listed (TodoRead, TodoWrite, Task as tool_chain,
-Skill, ToolSearch, etc.) follow the "all others" rule: Aggressive Trim.
+Tools not explicitly listed (TodoRead, TodoWrite, Skill, ToolSearch, etc.)
+follow the "all others" rule: Aggressive Trim.
 </core>
 </section>
 
@@ -62,8 +62,10 @@ Skill, ToolSearch, etc.) follow the "all others" rule: Aggressive Trim.
 <mandatory>
 ## Always Drop
 
-- **Thinking blocks** — entries containing `<thinking>` tags. Internal reasoning
-  is never needed on resume, even in positional positions (e.g., final segment).
+- **Thinking blocks** — entries containing content blocks with `"type": "thinking"`.
+  Internal reasoning is never needed on resume, even in positional positions
+  (e.g., final segment). Note: entries with BOTH thinking and non-empty text
+  content are classified as `conversation`, not `thinking` — the text is preserved.
 - **Progress entries** — streaming progress markers with no content value.
   These are display artifacts, not conversation.
 - **Micro-compact boundaries** — `microcompact_boundary` system entries are
@@ -81,9 +83,11 @@ Skill, ToolSearch, etc.) follow the "all others" rule: Aggressive Trim.
 - **Context header** — the first segment(s) of the conversation as defined by
   the context-header-definition section. This is the session's identity.
 - **Existing compact boundaries** — `boundary` type segments from prior
-  `/compact` or smart-compact operations. Preserve the compaction history.
-- **Final segment** — the last assistant response before compaction began.
-  This preserves continuity on resume.
+  `/compact` or Lethe operations. Preserve the compaction history.
+- **Final segment** — the last segment that is not an Always Drop type
+  (thinking, progress). This preserves continuity on resume. If the very last
+  segment is thinking or progress, walk backwards to find the last substantive
+  segment and apply KEEP to it.
 - **User preference statements** — during evaluation of "Evaluate" segments,
   if a segment is found to contain explicit user instructions about workflow,
   tools, or preferences, mark it KEEP regardless of its structural type.
@@ -127,13 +131,18 @@ Target summaries (3-5 sentences):
 ## Evaluate (read segment content, then decide)
 
 For segments marked "Evaluate" in the mapping table, read the full segment
-content via `compact-analyze.py --read-segment` and apply judgment:
+content via `lethe-analyze.py --read-segment` and apply judgment:
 
 **Error/retry chains:**
+When evaluating `error_chain` segments, also consider adjacent segments for
+resolution context — the fix (tool_chain or conversation) is typically in a
+subsequent segment, not the error segment itself.
 - If errors were followed by a successful workaround → SUMMARIZE, noting
   that errors preceded success and what the workaround was.
 - If errors are unresolved or represent ongoing issues → KEEP.
 - If errors are transient retries with no lasting impact → DROP.
+- If the segment contains a mix of errored and successful results → treat as
+  error chain (evaluate for resolution).
 
 **Conversation blocks:**
 - Architectural decisions or design choices → KEEP
@@ -158,7 +167,9 @@ If yes → KEEP or SUMMARIZE. If no → DROP.
 The context header is the first N segments of the conversation, defined as:
 everything from the start until the first `tool_chain` or `mcp_chain` segment
 that is NOT immediately preceded by a conversation segment in the same
-interaction group.
+interaction group. This boundary is capped at 10% of segments (see Maximum below).
+Thinking and progress segments within the header range are skipped during
+boundary detection and retain their Always Drop classification.
 
 In practice, this captures the initial plan discussion, setup instructions,
 and any early exploration before the first substantial work block begins.
@@ -178,14 +189,17 @@ context header is the first interaction group only.
 ## Context Budget Safety Valve
 
 If the manifest contains more than 30 segments requiring evaluation
-(segments whose rule is "Evaluate" in the mapping table):
+(segments whose rule is "Evaluate" in the mapping table — roughly the point
+where evaluation costs risk exhausting the compactor's own context budget):
 
-1. `conversation` segments in the **oldest 50%** of the conversation that would
+1. `conversation` segments in the **first 50% of segments by position** that would
    normally be "Evaluate" → auto SUMMARIZE with a generic summary: "Earlier
    discussion about [topic based on content_preview from manifest]."
-2. `error_chain` segments in the **oldest 50%** → auto SUMMARIZE with:
+2. `error_chain` segments in the **first 50% by position** → auto SUMMARIZE with:
    "Error encountered in [tool/context based on content_preview]."
-3. Only evaluate segments in the **newest 50%** of the conversation.
+3. Only evaluate segments in the **latter 50%** of the conversation.
+4. Safety-valve segments skip `--read-segment` content reading. Write their
+   sidecar files alongside other summaries in step 5 of Phase 3.
 
 This prevents the compactor from exhausting its own context window by reading
 too many segments for evaluation.
@@ -199,7 +213,7 @@ too many segments for evaluation.
 When replacing segments with summaries, the splicer emits a **user-assistant
 pair** to preserve turn structure and prevent consecutive same-role messages:
 
-- **User entry**: `[smart-compact summary] <summary text>`
+- **User entry**: `[lethe summary] <summary text>`
 - **Assistant entry**: `Understood. Context from previous work has been preserved as a summary above.`
 
 The summary pair preserves turn structure at the position of the original segment.
@@ -209,30 +223,31 @@ This format is non-negotiable — consecutive same-role messages confuse the
 model on resume.
 
 When writing summary sidecar files, write only the summary text itself
-(without the `[smart-compact summary]` prefix — the splicer adds that).
+(without the `[lethe summary]` prefix — the splicer adds that).
 </mandatory>
 </section>
 
 <section id="idempotency">
-<core>
+<mandatory>
 ## Idempotency (Already-Compacted Sessions)
 
-smart-compact can safely run on sessions that were previously compacted
-by either `/compact` or smart-compact:
+Lethe can safely run on sessions that were previously compacted
+by either `/compact` or Lethe:
 
 - Existing `boundary` segments are Always Keep (preserves compaction markers).
 - Summary text following a boundary is part of the next `conversation` segment
   and is treated normally by the mapping table.
-- Prior `[smart-compact summary]` entries appear as regular conversation
-  segments and are evaluated normally. However, treat them conservatively —
-  prefer KEEP over re-summarizing to avoid reducing already-condensed
-  information to meaningless generalities.
+- Prior `[lethe summary]` entries appear as regular conversation
+  segments and are evaluated normally. **KEEP over re-summarizing** —
+  re-summarizing already-condensed summaries causes progressive information
+  loss. Only re-summarize if the summary is clearly redundant with other
+  kept content.
 - Segments immediately following a `boundary` segment should be treated
   conservatively (prefer KEEP) as they represent the most recent state
   after a prior compaction.
 - The splicer handles chains that already contain synthetic summary entries
   without special treatment — they are just regular chain entries.
-</core>
+</mandatory>
 </section>
 
 <section id="future-modes">

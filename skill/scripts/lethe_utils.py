@@ -1,8 +1,10 @@
 """
-smart-compact: Shared utilities for JSONL parsing, chain walking, and entry classification.
+Lethe: Shared utilities for JSONL session analysis.
 
-Used by compact-analyze.py and compact-splice.py. Single source of truth for
-core data structures and classification logic.
+Provides JSONL parsing, parentUuid chain walking, entry classification,
+segment building, non-chain line association, token estimation, and session
+metadata extraction. Used by lethe-analyze.py and lethe-splice.py as
+the single source of truth for core data structures and classification logic.
 """
 
 from __future__ import annotations
@@ -17,14 +19,18 @@ CHAIN_TYPES = {"user", "assistant", "progress"}
 # state snapshots that reuse a small number of UUIDs across many entries.
 # walk_chain "bridges" through these transparently.
 BRIDGE_TYPES = {"saved_hook_context"}
+# compact_boundary MUST remain in this set — is_chain_entry uses it to include
+# system entries in the chain. classify_entry handles compact_boundary specially
+# (returns "boundary"), but removing it from here would break chain walking.
 CHAIN_SYSTEM_SUBTYPES = {
     "compact_boundary", "microcompact_boundary",
     "stop_hook_summary", "turn_duration", "local_command",
     "api_error",
 }
 
-# Diff markers for git_diff detection
-DIFF_MARKERS = ("diff --git", "@@ ", "--- a/", "+++ b/")
+# Diff markers for git_diff detection.
+# Uses "@@ -" instead of "@@ " for specificity — plain "@@ " could appear in text.
+DIFF_MARKERS = ("diff --git", "@@ -", "--- a/", "+++ b/")
 
 
 def find_jsonl(session_id: str, project_slug: str | None = None) -> Path:
@@ -56,18 +62,23 @@ def parse_jsonl(path: Path) -> list[dict]:
     """Parse JSONL file into list of dicts.
 
     Note: malformed lines are skipped, so list indices may not correspond
-    to original file line numbers.
+    to original file line numbers. This means bridge resolution using
+    positional lookups and manifest line_range values are offset by the
+    number of skipped lines.
     """
     lines = []
+    malformed_count = 0
     with open(path, "r", encoding="utf-8", errors="replace") as f:
         for i, line in enumerate(f):
             line = line.strip()
             if line:
                 try:
                     lines.append(json.loads(line))
-                except json.JSONDecodeError as e:
-                    print(f"Warning: Skipping malformed JSON at line {i+1}: {e}", file=sys.stderr)
+                except json.JSONDecodeError:
+                    malformed_count += 1
                     continue
+    if malformed_count:
+        print(f"Warning: skipped {malformed_count} malformed JSONL line(s) in {path.name}", file=sys.stderr)
     return lines
 
 
@@ -78,8 +89,15 @@ def is_chain_entry(entry: dict) -> bool:
     etype = entry.get("type", "")
     if etype in CHAIN_TYPES:
         return True
-    if etype == "system" and entry.get("subtype") in CHAIN_SYSTEM_SUBTYPES:
-        return True
+    if etype == "system":
+        if entry.get("subtype") in CHAIN_SYSTEM_SUBTYPES:
+            return True
+        # Warn about unknown system subtypes that have UUIDs — they may need
+        # to be added to CHAIN_SYSTEM_SUBTYPES to avoid chain truncation.
+        if entry.get("parentUuid") is not None:
+            subtype = entry.get("subtype", "<none>")
+            if subtype not in ("summary",):  # known non-chain system subtypes
+                print(f"Warning: system entry with UUID has unrecognized subtype '{subtype}' — may need chain inclusion", file=sys.stderr)
     return False
 
 
@@ -98,7 +116,10 @@ def walk_chain(lines: list[dict]) -> list[tuple[int, dict]]:
         u = entry.get("uuid")
         if u and is_chain_entry(entry):
             if u in uuid_to_idx:
-                print(f"Warning: duplicate UUID {u[:12]}... at lines {uuid_to_idx[u]+1} and {i+1}, keeping later", file=sys.stderr)
+                prev_idx = uuid_to_idx[u]
+                prev_parent = lines[prev_idx].get("parentUuid", "none")[:12] if lines[prev_idx].get("parentUuid") else "none"
+                curr_parent = entry.get("parentUuid", "none")[:12] if entry.get("parentUuid") else "none"
+                print(f"Warning: duplicate UUID {u[:12]}... at lines {prev_idx+1} (parent={prev_parent}...) and {i+1} (parent={curr_parent}...), keeping later", file=sys.stderr)
             uuid_to_idx[u] = i
 
     # Build bridge map for non-chain entries with UUIDs (e.g., saved_hook_context).
@@ -154,14 +175,23 @@ def walk_chain(lines: list[dict]) -> list[tuple[int, dict]]:
         else:
             print(f"Warning: chain truncated — parentUuid {current[:12]}... not found in chain entries", file=sys.stderr)
             break
+    else:
+        # Safety limit exhausted — likely a cycle in parentUuid references
+        print(f"Warning: chain walk hit safety limit ({len(lines)} iterations) — possible cycle in parentUuid chain", file=sys.stderr)
 
     chain.reverse()
+
+    # Sanity check: warn if many chain entries were not reached (possible fork)
+    total_chain_entries = sum(1 for e in lines if is_chain_entry(e) and not e.get("isSidechain"))
+    if len(chain) < total_chain_entries * 0.5 and total_chain_entries > 10:
+        print(f"Warning: chain walk found {len(chain)} of {total_chain_entries} non-sidechain chain entries — possible orphaned fork", file=sys.stderr)
+
     return chain
 
 
 def get_content_blocks(entry: dict) -> list[dict]:
     """Extract content blocks from an entry's message."""
-    msg = entry.get("message", {})
+    msg = entry.get("message") or {}
     content = msg.get("content", [])
     if isinstance(content, list):
         return [b for b in content if isinstance(b, dict)]
@@ -170,7 +200,7 @@ def get_content_blocks(entry: dict) -> list[dict]:
 
 def get_text_content(entry: dict) -> str:
     """Extract all text content from an entry for token estimation."""
-    msg = entry.get("message", {})
+    msg = entry.get("message") or {}
     content = msg.get("content", "")
 
     if isinstance(content, str):
@@ -231,25 +261,19 @@ def classify_entry(entry: dict, preceding_tool_type: str | None) -> str:
     if etype == "assistant":
         tool_uses = [b for b in blocks if b.get("type") == "tool_use"]
         if tool_uses:
-            # Collect all tool types, return the most conservative
-            tool_types = set()
-            for tu in tool_uses:
-                name = tu.get("name", "")
-                if name.startswith("mcp__"):
-                    tool_types.add("mcp_chain")
-                elif name == "Task":
-                    tool_types.add("task_result")
-                else:
-                    tool_types.add("tool_chain")
-            # Priority: mcp_chain > task_result > tool_chain (most specific wins)
-            if "mcp_chain" in tool_types:
-                return "mcp_chain"
-            if "task_result" in tool_types:
-                return "task_result"
-            return "tool_chain"
+            return _classify_tool_chain(tool_uses)
 
         # No tool_use — check for thinking
         if "thinking" in block_types:
+            # If both thinking and text content are present, classify as
+            # conversation to preserve the text response (data loss bug if
+            # classified as thinking → Always Drop).
+            has_text = any(
+                b.get("type") == "text" and b.get("text", "").strip()
+                for b in blocks
+            )
+            if has_text:
+                return "conversation"
             return "thinking"
 
         return "conversation"
@@ -263,7 +287,9 @@ def classify_entry(entry: dict, preceding_tool_type: str | None) -> str:
                 if tr.get("is_error"):
                     return "error_chain"
 
-            # Check for git diff content
+            # Check for git diff content. Simplification: classifies the
+            # entire entry as git_diff if any tool_result contains diff markers,
+            # even if other tool_results in the same entry do not.
             text = get_text_content(entry)
             if any(marker in text for marker in DIFF_MARKERS):
                 return "git_diff"
@@ -278,6 +304,25 @@ def classify_entry(entry: dict, preceding_tool_type: str | None) -> str:
         return "conversation"
 
     return "conversation"
+
+
+def _classify_tool_chain(tool_uses: list[dict]) -> str:
+    """Classify tool_use blocks into chain type (mcp_chain > task_result > tool_chain)."""
+    tool_types = set()
+    for tu in tool_uses:
+        name = tu.get("name", "")
+        if name.startswith("mcp__"):
+            tool_types.add("mcp_chain")
+        elif name == "Task":
+            tool_types.add("task_result")
+        else:
+            tool_types.add("tool_chain")
+    # Priority: mcp_chain > task_result > tool_chain (most specific wins)
+    if "mcp_chain" in tool_types:
+        return "mcp_chain"
+    if "task_result" in tool_types:
+        return "task_result"
+    return "tool_chain"
 
 
 def extract_tool_names(entry: dict) -> list[str]:
@@ -301,6 +346,8 @@ def build_segments(chain: list[tuple[int, dict]]) -> list[dict]:
 
     segments = []
     current_segment = None
+    # Group 0 exists only if the chain starts with non-user entries (system,
+    # assistant). First user text message increments to group 1.
     interaction_group_id = 0
     preceding_tool_type = None
 
@@ -318,25 +365,10 @@ def build_segments(chain: list[tuple[int, dict]]) -> list[dict]:
         seg_type = classify_entry(entry, preceding_tool_type)
 
         # Track preceding tool type for tool_result inheritance
-        # Use most-conservative-wins logic matching classify_entry
         if etype == "assistant":
             tool_uses = [b for b in get_content_blocks(entry) if b.get("type") == "tool_use"]
             if tool_uses:
-                tool_types = set()
-                for tu in tool_uses:
-                    name = tu.get("name", "")
-                    if name.startswith("mcp__"):
-                        tool_types.add("mcp_chain")
-                    elif name == "Task":
-                        tool_types.add("task_result")
-                    else:
-                        tool_types.add("tool_chain")
-                if "mcp_chain" in tool_types:
-                    preceding_tool_type = "mcp_chain"
-                elif "task_result" in tool_types:
-                    preceding_tool_type = "task_result"
-                else:
-                    preceding_tool_type = "tool_chain"
+                preceding_tool_type = _classify_tool_chain(tool_uses)
         elif etype == "user":
             blocks = get_content_blocks(entry)
             has_tool_result = any(b.get("type") == "tool_result" for b in blocks)
@@ -385,7 +417,8 @@ def build_segments(chain: list[tuple[int, dict]]) -> list[dict]:
             if block.get("type") == "tool_result" and block.get("is_error"):
                 current_segment["has_errors"] = True
 
-        # Token estimation
+        # Token estimation: chars / 4 approximation. Counts message content
+        # only — excludes entry metadata overhead (~50 tokens per entry).
         text = get_text_content(entry)
         current_segment["estimated_tokens"] += len(text) // 4
 
@@ -403,6 +436,9 @@ def associate_non_chain_lines(
     Non-chain entries within a segment's line range are assigned to that segment.
     Entries between segments are assigned to the preceding segment.
     Entries before the first segment remain unassigned.
+
+    Note: O(S×L) where S=segments, L=non-chain lines. Acceptable for expected
+    session sizes (typically <1000 segments, <10000 lines).
     """
     seg_ranges = [(s["line_range"][0], s["line_range"][1], s["id"]) for s in segments]
     seg_by_id = {s["id"]: s for s in segments}
@@ -434,14 +470,14 @@ def get_session_metadata(lines: list[dict]) -> dict:
     """
     metadata = {"sessionId": None, "cwd": None, "version": None, "gitBranch": None}
     for entry in lines:
-        if entry.get("sessionId") and not metadata["sessionId"]:
+        if entry.get("sessionId") is not None and metadata["sessionId"] is None:
             metadata["sessionId"] = entry["sessionId"]
-        if entry.get("cwd") and not metadata["cwd"]:
+        if entry.get("cwd") is not None and metadata["cwd"] is None:
             metadata["cwd"] = entry["cwd"]
-        if entry.get("version") and not metadata["version"]:
+        if entry.get("version") is not None and metadata["version"] is None:
             metadata["version"] = entry["version"]
-        if entry.get("gitBranch") and not metadata["gitBranch"]:
+        if entry.get("gitBranch") is not None and metadata["gitBranch"] is None:
             metadata["gitBranch"] = entry["gitBranch"]
-        if all(metadata.values()):
+        if all(v is not None for v in metadata.values()):
             break
     return metadata

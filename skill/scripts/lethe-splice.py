@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-smart-compact: Re-synthesis Splicer — Cut-plan → New JSONL
+Lethe: Re-synthesis Splicer — Cut-plan → New JSONL
 
 Takes a cut-plan JSON (produced by the compactor's decision phase) and
 re-synthesizes a new JSONL file. Kept segments preserve original UUIDs,
@@ -8,7 +8,7 @@ dropped segments are removed, and summarized segments are replaced with
 user→assistant summary pairs.
 
 Usage:
-    compact-splice.py <SESSION_ID> --cut-plan <PATH_TO_PLAN_JSON>
+    lethe-splice.py <SESSION_ID> --cut-plan <PATH_TO_PLAN_JSON>
         [--project-slug <SLUG>] [--no-backup]
 
 Exit codes:
@@ -34,13 +34,16 @@ import uuid as uuid_mod
 from datetime import datetime, timezone
 from pathlib import Path
 
-from compact_utils import (
+# Note: classify_entry and get_content_blocks are NOT imported here.
+# The splicer intentionally does NOT call identify_context_header — segment
+# IDs are assigned by position in build_segments, which is deterministic
+# regardless of whether header identification runs. The splicer only uses
+# segment IDs (not types) for matching against the cut-plan.
+from lethe_utils import (
     BRIDGE_TYPES,
     associate_non_chain_lines,
     build_segments,
-    classify_entry,
     find_jsonl,
-    get_content_blocks,
     get_session_metadata,
     get_text_content,
     is_chain_entry,
@@ -90,7 +93,7 @@ def make_summary_pair(
         "type": "user",
         "message": {
             "role": "user",
-            "content": f"[smart-compact summary] {summary_text}",
+            "content": f"[lethe summary] {summary_text}",
         },
         "uuid": user_uuid,
         # userType "external" marks this as injected content, not direct user input.
@@ -132,17 +135,24 @@ def load_cut_plan(path: str) -> dict:
     if "actions" not in plan:
         raise ValueError("Cut-plan missing 'actions' array")
 
+    seen_ids = set()
     for action in plan["actions"]:
         if "segment_id" not in action:
             raise ValueError(f"Action missing 'segment_id': {action}")
         action["segment_id"] = int(action["segment_id"])
+        sid = action["segment_id"]
+        if sid < 1:
+            raise ValueError(f"Invalid segment_id {sid}: must be >= 1")
+        if sid in seen_ids:
+            raise ValueError(f"Duplicate segment_id {sid} in cut-plan")
+        seen_ids.add(sid)
         if action.get("action") not in ("keep", "drop", "summarize"):
             raise ValueError(
-                f"Invalid action '{action.get('action')}' for segment {action['segment_id']}"
+                f"Invalid action '{action.get('action')}' for segment {sid}"
             )
         if action["action"] == "summarize" and "summary_file" not in action:
             raise ValueError(
-                f"Summarize action for segment {action['segment_id']} missing 'summary_file'"
+                f"Summarize action for segment {sid} missing 'summary_file'"
             )
 
     return plan
@@ -156,7 +166,10 @@ def safety_check(lines: list[dict]) -> list[str]:
     warnings = []
     for entry in lines:
         etype = entry.get("type", "")
-        if etype and etype not in KNOWN_TYPES:
+        if not etype and is_chain_entry(entry):
+            uid = entry.get("uuid", "???")[:12]
+            warnings.append(f"Chain entry {uid}... has no type field")
+        elif etype and etype not in KNOWN_TYPES:
             if is_chain_entry(entry):
                 raise ValueError(
                     f"Unknown chain-participating entry type '{etype}' "
@@ -173,10 +186,13 @@ def build_new_jsonl(
     segments: list[dict],
     action_map: dict[int, dict],
     metadata: dict,
-) -> tuple[list[dict], dict]:
+    session_id: str | None = None,
+) -> tuple[list[dict], dict, set[str]]:
     """Re-synthesize the JSONL based on the cut-plan.
 
-    Returns (new_lines, stats).
+    Returns (new_lines, stats, generated_summary_uuids).
+    The generated_summary_uuids set enables verification to distinguish
+    freshly generated summaries from pre-existing ones in re-compacted sessions.
     """
     seg_by_id = {s["id"]: s for s in segments}
     uuid_to_seg = {}
@@ -185,7 +201,7 @@ def build_new_jsonl(
             uuid_to_seg[uid] = seg["id"]
 
     # Build the new chain
-    new_chain_entries = []  # (original_line_idx | None, entry_dict)
+    new_chain_entries = []  # (position, entry_dict) — real entries use line_idx, synthetic use fractional
     last_emitted_uuid = None
     kept_non_chain_lines = set()
 
@@ -195,6 +211,8 @@ def build_new_jsonl(
         uid = entry.get("uuid")
         if uid:
             uuid_to_entry[uid] = entry
+
+    generated_summary_uuids = set()  # Track UUIDs of freshly generated summaries
 
     stats = {
         "segments_kept": 0,
@@ -265,25 +283,30 @@ def build_new_jsonl(
 
             # Read summary from sidecar file
             summary_file = action_info.get("summary_file", "")
+            # Validate path is under expected directory
+            if session_id:
+                expected_prefix = f"/tmp/lethe/{session_id}/"
+                if not summary_file.startswith(expected_prefix):
+                    raise ValueError(f"Summary file {summary_file} must be under {expected_prefix}")
             try:
                 summary_text = Path(summary_file).read_text().strip()
             except (OSError, FileNotFoundError) as e:
                 raise ValueError(f"Cannot read summary file {summary_file}: {e}")
+            if not summary_text:
+                raise ValueError(f"Summary file {summary_file} is empty")
 
             # Estimate summary tokens
             stats["new_tokens_est"] += len(summary_text) // 4 + 20  # +20 for ack
 
-            parent = last_emitted_uuid
-            if parent is None:
-                # Edge case: summarizing the very first segment
-                parent = None
-
             user_entry, assistant_entry = make_summary_pair(
-                summary_text, parent, metadata,
+                summary_text, last_emitted_uuid, metadata,
             )
 
-            new_chain_entries.append((None, user_entry))
-            new_chain_entries.append((None, assistant_entry))
+            generated_summary_uuids.add(user_entry["uuid"])
+            # Position at the segment's original start with fractional offsets
+            seg_start = seg["line_range"][0]
+            new_chain_entries.append((seg_start + 0.001, user_entry))
+            new_chain_entries.append((seg_start + 0.002, assistant_entry))
             last_emitted_uuid = assistant_entry["uuid"]
             # Non-chain lines in summarized segments are discarded
 
@@ -308,24 +331,10 @@ def build_new_jsonl(
             # Unclaimed non-chain entries (between segments) → preserve
             non_chain_to_keep.append((i, entry))
 
-    # Merge: chain entries + non-chain entries, sorted by original position
-    # Synthetic entries (line_idx=None) are inserted at the position of the
-    # segment they replace
-    all_entries = []
-    for line_idx, entry in new_chain_entries:
-        if line_idx is not None:
-            all_entries.append((line_idx, entry))
-        else:
-            # Synthetic entries: place them at a position that maintains order
-            # Use the position just after the last real entry
-            # Synthetic entries use fractional positions (e.g., 42.5) to sort
-            # between real entries without shifting indices. This is safe because
-            # positions are only used for ordering, never as array indices.
-            if all_entries:
-                pos = all_entries[-1][0] + 0.5  # fractional to sort between
-            else:
-                pos = -1
-            all_entries.append((pos, entry))
+    # Merge: chain entries + non-chain entries, sorted by position.
+    # Chain entries already have positions assigned (real line_idx for kept
+    # entries, fractional seg_start+offset for synthetic summary pairs).
+    all_entries = list(new_chain_entries)
 
     for line_idx, entry in non_chain_to_keep:
         all_entries.append((line_idx, entry))
@@ -333,13 +342,14 @@ def build_new_jsonl(
     all_entries.sort(key=lambda x: x[0])
 
     new_lines = [entry for _, entry in all_entries]
-    return new_lines, stats
+    return new_lines, stats, generated_summary_uuids
 
 
 def verify_new_chain(
     new_lines: list[dict],
     segments: list[dict],
     action_map: dict[int, dict],
+    generated_summary_uuids: set[str] | None = None,
 ) -> dict:
     """Verify the re-synthesized chain integrity."""
     try:
@@ -378,16 +388,25 @@ def verify_new_chain(
                     no_drops_reachable = False
                     break
 
-    # Check summary count matches summarized segments
+    # Check summary count — only count freshly generated summaries to handle
+    # re-compaction correctly (pre-existing summaries from prior runs are kept
+    # segments and should not inflate the count).
     expected_summaries = sum(
         1 for seg in segments
         if action_map.get(seg["id"], {}).get("action") == "summarize"
     )
-    actual_summaries = 0
-    for _, entry in new_chain:
-        content = entry.get("message", {}).get("content", "")
-        if isinstance(content, str) and content.startswith("[smart-compact summary]"):
-            actual_summaries += 1
+    if generated_summary_uuids:
+        actual_summaries = sum(
+            1 for _, entry in new_chain
+            if entry.get("uuid") in generated_summary_uuids
+        )
+    else:
+        # Fallback for callers without UUID tracking
+        actual_summaries = 0
+        for _, entry in new_chain:
+            content = (entry.get("message") or {}).get("content", "")
+            if isinstance(content, str) and content.startswith("[lethe summary]"):
+                actual_summaries += 1
     all_summaries_present = actual_summaries == expected_summaries
 
     # Check original UUIDs of summarized segments are absent
@@ -401,8 +420,13 @@ def verify_new_chain(
             summarized_uuids_absent = False
             break
 
-    # Check turn alternation (no consecutive same-role messages)
-    # Allow progress entries between same-role turns
+    # Check turn alternation (no consecutive same-role messages).
+    # System entries reset the role tracker because they don't participate
+    # in user/assistant alternation — consecutive users separated by a system
+    # entry is acceptable. Progress entries are invisible (skipped).
+    # Note: adjacent summaries can create user→user when a kept user entry
+    # precedes a summary pair. This is a known limitation — turn_alternation_ok
+    # is informational only and does NOT affect the ok flag.
     turn_alternation_ok = True
     last_role = None
     for _, entry in new_chain:
@@ -411,7 +435,7 @@ def verify_new_chain(
         if entry.get("type") == "system":
             last_role = None
             continue
-        role = entry.get("message", {}).get("role")
+        role = (entry.get("message") or {}).get("role")
         if role and role == last_role:
             turn_alternation_ok = False
             break
@@ -427,9 +451,6 @@ def verify_new_chain(
         "no_drops_reachable": no_drops_reachable,
         "turn_alternation_ok": turn_alternation_ok,
     }
-    # turn_alternation_ok is informational only — Claude Code's built-in /compact
-    # creates consecutive user entries (resume prompt + command), so pre-compacted
-    # sessions legitimately fail this check.
     result["ok"] = all([
         all_keeps_reachable,
         all_summaries_present,
@@ -440,19 +461,26 @@ def verify_new_chain(
 
 
 def write_jsonl(path: Path, lines: list[dict]):
-    """Write JSONL atomically (temp file + fsync → rename)."""
-    tmp_path = path.with_suffix(".jsonl.tmp")
+    """Write JSONL atomically (temp file + fsync → rename + dir fsync)."""
+    rand = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
+    tmp_path = path.with_suffix(f".jsonl.tmp-{rand}")
     with open(tmp_path, "w") as f:
         for entry in lines:
-            f.write(json.dumps(entry, separators=(",", ":"), default=str) + "\n")
+            f.write(json.dumps(entry, separators=(",", ":")) + "\n")
         f.flush()
         os.fsync(f.fileno())
     tmp_path.rename(path)
+    # Fsync parent directory to ensure the rename is durable
+    dir_fd = os.open(str(path.parent), os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="smart-compact: Re-synthesis splicer — cut-plan → new JSONL"
+        description="Lethe: Re-synthesis splicer — cut-plan → new JSONL"
     )
     parser.add_argument("session_id", help="Session ID to splice")
     parser.add_argument(
@@ -474,6 +502,15 @@ def main():
 
     args = parser.parse_args()
 
+    try:
+        _run(args)
+    except Exception as e:
+        print(json.dumps({"ok": False, "error": f"Unexpected error: {e}"}), file=sys.stderr)
+        sys.exit(EXIT_UNEXPECTED)
+
+
+def _run(args):
+    """Main execution logic, wrapped for top-level exception handling."""
     # Find and parse JSONL
     try:
         if args.jsonl_path:
@@ -510,7 +547,11 @@ def main():
         action_map[action["segment_id"]] = action
 
     # Walk chain and build segments
-    chain = walk_chain(lines)
+    try:
+        chain = walk_chain(lines)
+    except ValueError as e:
+        print(json.dumps({"ok": False, "error": str(e)}), file=sys.stderr)
+        sys.exit(EXIT_FILE_NOT_FOUND)
     segments = build_segments(chain)
     associate_non_chain_lines(lines, segments)
     metadata = get_session_metadata(lines)
@@ -520,6 +561,10 @@ def main():
     # Verify all segments have actions
     missing = [s["id"] for s in segments if s["id"] not in action_map]
     if missing:
+        # Threshold: if >50% of segments missing, treat as likely error
+        if len(missing) > len(segments) * 0.5:
+            print(json.dumps({"ok": False, "error": f"Cut-plan covers <50% of segments ({len(segments) - len(missing)}/{len(segments)})"}), file=sys.stderr)
+            sys.exit(EXIT_PLAN_INVALID)
         print(
             f"WARNING: Segments {missing} not in cut-plan, defaulting to keep",
             file=sys.stderr,
@@ -527,24 +572,18 @@ def main():
 
     # Re-synthesize
     try:
-        new_lines, stats = build_new_jsonl(
+        new_lines, stats, generated_summary_uuids = build_new_jsonl(
             lines, chain, segments, action_map, metadata,
+            session_id=args.session_id,
         )
     except ValueError as e:
         print(json.dumps({"ok": False, "error": str(e)}), file=sys.stderr)
         sys.exit(EXIT_PLAN_INVALID)
 
-    # Backup
-    backup_path_str = None
-    if not args.no_backup:
-        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-        rand = "".join(random.choices(string.ascii_lowercase + string.digits, k=4))
-        backup_path = jsonl_path.with_suffix(f".jsonl.bak-{ts}-{rand}")
-        shutil.copy2(jsonl_path, backup_path)
-        backup_path_str = str(backup_path)
-
-    # Verify BEFORE writing
-    verification = verify_new_chain(new_lines, segments, action_map)
+    # Verify BEFORE writing (and before backup to avoid wasted copies on failure)
+    verification = verify_new_chain(
+        new_lines, segments, action_map, generated_summary_uuids,
+    )
 
     # Build result
     reduction_pct = 0.0
@@ -552,6 +591,18 @@ def main():
         reduction_pct = round(
             (1 - stats["new_tokens_est"] / stats["original_tokens_est"]) * 100, 1
         )
+
+    # Backup (only on verification success to avoid wasted copies)
+    backup_path_str = None
+    if verification["ok"] and not args.no_backup:
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        rand = "".join(random.choices(string.ascii_lowercase + string.digits, k=4))
+        backup_path = jsonl_path.with_suffix(f".jsonl.bak-{ts}-{rand}")
+        shutil.copy2(jsonl_path, backup_path)
+        # Verify backup integrity
+        if backup_path.stat().st_size != jsonl_path.stat().st_size:
+            print(f"WARNING: Backup size mismatch", file=sys.stderr)
+        backup_path_str = str(backup_path)
 
     result = {
         "ok": verification["ok"],
@@ -568,12 +619,9 @@ def main():
     }
 
     if not verification["ok"]:
-        # Do NOT write — report error and backup path
+        # Do NOT write — report error, no backup created
         print(json.dumps(result, indent=2))
-        msg = "VERIFICATION FAILED. Original preserved."
-        if backup_path_str:
-            msg += f" Backup at: {backup_path_str}"
-        print(msg, file=sys.stderr)
+        print("VERIFICATION FAILED. Original preserved.", file=sys.stderr)
         sys.exit(EXIT_VERIFY_FAILED)
 
     # Verification passed — write the new JSONL

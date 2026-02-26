@@ -56,16 +56,24 @@ These are empirically verified facts about Claude Code's JSONL format:
 ```
 smart-compact/
   plugin.json
-  skills/smart-compact/
-    SKILL.md                      # Thin router (~30 lines)
+  skill/
+    SKILL.md                      # Router + self-compaction flow
     references/
       compactor.md                # Full compactor logic (unified flow)
       rules.md                    # Centralized compaction rules
-  scripts/
-    compact-analyze.py            # JSONL parse → segment manifest (JSON)
-    compact-splice.py             # Re-synthesis splicer: cut-plan → new JSONL
-    compact-discover.py           # Watermark → SESSION_ID + terminal/PID/cwd
+    examples/
+      example-segment-manifest.md
+      example-cut-plan-with-sidecars.md
+      example-splice-result.md
+    scripts/
+      compact-analyze.py          # JSONL parse → segment manifest (JSON)
+      compact-splice.py           # Re-synthesis splicer: cut-plan → new JSONL
+      compact-discover.py         # Watermark → SESSION_ID + terminal/PID/cwd
 ```
+
+The `skill/` layout (not `skills/<name>/`) matches the staged skill repository
+convention used in this workspace and is the expected loader shape for these
+single-skill packages.
 
 ---
 
@@ -88,13 +96,13 @@ When a session invokes the skill with no arguments, SKILL.md provides prep instr
 
 1. Generate a random UUID watermark: run `uuidgen`
 2. Output exactly: `COMPACT_WATERMARK:<uuid>`
-3. Discover own PID via process tree: walk up from `$$` using `ps -o ppid=` until you find the `claude` process PID
+3. Discover own Claude PID from shell parent: `ps -o ppid= $$`, then verify parent args contain `claude`
 4. Determine a summary prompt for the resumed self — what should you continue doing after compaction? Write it concisely.
-5. Run `compact-discover.py <uuid> --pid <pid>` → returns JSON with `session_id`, `terminal_launch`, `cwd`
+5. Run `compact-discover.py <uuid> --pid <pid>` → returns JSON with `session_id`, `project_slug`, `terminal_launch`, `cwd`
 6. Launch external compactor using the returned `terminal_launch` template:
-   `<terminal_launch> claude "/smart-compact <session_id> --orchestrate <pid> '<resume_prompt>'"`
+   `<terminal_launch> claude "/smart-compact <session_id> --project-slug <project_slug> --orchestrate <pid> <resume_prompt>"`
 7. Output: "Compaction launched. This session will be terminated shortly."
-8. Use AskUserQuestion to wait for user input. Do NOT proceed with any other work. The compactor will kill this session.
+8. Stop output and wait for termination. Do NOT proceed with any other work. The compactor will kill this session.
 
 ---
 
@@ -106,6 +114,8 @@ Runs when SESSION_ID is provided — handles both user-invoked and orchestrated 
 
 ```
 $SESSION_ID                          — Required. Target session to compact.
+--project-slug $PROJECT_SLUG         — Optional. Project directory slug under
+                                       ~/.claude/projects/ for faster lookup.
 --orchestrate $PID "$RESUME_PROMPT"  — Optional. Kill PID, then relaunch after splice.
                                        RESUME_PROMPT is optional within --orchestrate.
 ```
@@ -113,60 +123,64 @@ $SESSION_ID                          — Required. Target session to compact.
 ### Unified Flow
 
 **Phase 1: Kill** (ONLY if --orchestrate provided, otherwise skip to Phase 2)
-1. **Verify watermark flushed**: grep for `COMPACT_WATERMARK:` in the target session's JSONL. Retry up to 5 times with 1s sleep. If not found, the calling session may not have flushed — abort with error.
-2. Verify PID is alive: `kill -0 $PID`
+1. Verify PID is alive: `kill -0 $PID`
+2. Verify PID belongs to Claude: `ps -o args= -p $PID` must contain `claude`
 3. Send SIGTERM: `kill $PID` (allows Claude Code to flush buffers and clean up)
 4. Wait for graceful shutdown: retry `kill -0` up to 5 times with 2s sleep (10s total grace period)
 5. If still alive: `kill -9 $PID` (escalate to SIGKILL)
 6. Final verification: confirm PID is dead
 
 **Phase 2: Analyze**
-7. Run `compact-analyze.py $SESSION_ID` → capture JSON manifest
-8. Read the manifest: segments, token estimates, metadata
+7. Record `INITIAL_CWD` fallback from current process (`pwd`, then `$HOME` fallback)
+8. Run `compact-analyze.py $SESSION_ID --output .../manifest.json` (include `--project-slug` when available)
+9. Read the manifest: segments, token estimates, metadata
+10. Empty-session case (`No chain entries found`) aborts compaction early
 
 **Phase 3: Decide** (Claude's job)
-9. Read `references/rules.md` for compaction rules
-10. Review the manifest summary: total segments, total estimated tokens, segment type distribution
-11. **Context budget check**: If the manifest lists more than 30 segments requiring evaluation (segments whose rule is "Evaluate": `conversation` and `error_chain`), auto-SUMMARIZE the oldest 50% with generic summaries to reduce evaluation load.
-12. For each segment in the manifest, consult the segment-to-rule mapping table:
+11. Read `references/rules.md` for compaction rules
+12. Review the manifest summary: total segments, total estimated tokens, segment type distribution
+13. Apply Context Budget Safety Valve when evaluate-load exceeds 30 segments (auto-summaries skip `--read-segment`)
+14. Identify final non-Always-Drop segment and force KEEP
+15. For each segment in the manifest, consult the segment-to-rule mapping table:
     - If rules say "always drop" → mark DROP
     - If rules say "always keep" → mark KEEP
-    - If rules say "evaluate" → read segment content via `compact-analyze.py $SESSION_ID --read-segment $SEGMENT_ID`, then decide: KEEP, SUMMARIZE, or DROP
-13. For each segment marked SUMMARIZE: write a concise summary capturing decisions, outcomes, and file changes. Do NOT include raw tool outputs, full file contents, or verbose exploration. Write each summary to a sidecar file (`/tmp/smart-compact/summary-$SEGMENT_ID.txt`) to avoid JSON escaping issues.
-14. Build cut-plan JSON and write to temp file:
+    - If rules say "evaluate" → read segment content via `compact-analyze.py $SESSION_ID --read-segment $SEGMENT_ID`, then decide: KEEP, SUMMARIZE, or DROP (on read failure, default KEEP)
+16. For each segment marked SUMMARIZE: write a concise summary capturing decisions, outcomes, and file changes. Do NOT include raw tool outputs, full file contents, or verbose exploration. Write each summary to `/tmp/smart-compact/$SESSION_ID/summary-$SEGMENT_ID.txt`.
+17. Build cut-plan JSON and write to temp file:
 ```json
 {
   "session_id": "...",
   "actions": [
     {"segment_id": 1, "action": "keep"},
-    {"segment_id": 2, "action": "summarize", "summary_file": "/tmp/smart-compact/summary-2.txt"},
+    {"segment_id": 2, "action": "summarize", "summary_file": "/tmp/smart-compact/$SESSION_ID/summary-2.txt"},
     {"segment_id": 3, "action": "drop"}
   ]
 }
 ```
 
 **Phase 4: Splice**
-15. Run `compact-splice.py $SESSION_ID --cut-plan /path/to/plan.json`
-16. Verify result JSON shows `ok: true`
-17. If verification fails → report error, STOP
+18. Run `compact-splice.py $SESSION_ID --cut-plan /path/to/plan.json` (include `--project-slug` when available)
+19. Verify result JSON shows `ok: true` and `chain_verification.ok: true`
+20. If verification fails → report error and STOP (do not relaunch)
+21. Track reduction stats; <5% is treated as negligible reduction in reporting
 
 **Phase 5: Post-Splice**
 - If `--orchestrate` provided → go to Section A (Orchestrated Relaunch)
 - Otherwise → go to Section B (User Prompt)
 
 #### Section A: Orchestrated Relaunch
-18. Read `terminal_launch` and `cwd` from manifest metadata
-19. Build launch command:
-    - If RESUME_PROMPT provided: `nohup <terminal_launch> claude --resume $SESSION_ID "$RESUME_PROMPT" &`
-    - Else: `nohup <terminal_launch> claude --resume $SESSION_ID &`
-20. `disown` the process
-21. Exit. Compactor's job is done.
+22. Resolve relaunch cwd from manifest metadata; fallback to `INITIAL_CWD`, then `$HOME`
+23. Detect terminal with `compact-discover.py --detect-terminal $$ --cwd <cwd>`
+24. If terminal is undetected, output explicit manual resume command and stop
+25. Build relaunch script with `env -u CLAUDECODE claude --resume ...` (escape `"`/`\` in resume prompt before substitution)
+26. Launch via `nohup <terminal_launch with {command} replaced> ... &`, then `disown`
+27. Exit. Compactor's job is done.
 
 #### Section B: User Prompt
-18. Output: "Session compacted successfully. [reduction stats]"
-19. Ask user: "Launch resumed session?"
-    - Yes → detect terminal, launch resumed session
-    - No → output: `claude --resume $SESSION_ID`
+22. Output: "Session compacted successfully. [reduction stats]"
+23. Ask user: "Launch resumed session?"
+    - Yes → detect terminal, build resume script, launch
+    - No → output: `env -u CLAUDECODE claude --resume $SESSION_ID`
 
 ---
 
@@ -186,19 +200,19 @@ Centralized rules guiding segment-level decisions. Applied in order — first ma
 | `error_chain` | Evaluate | May reveal workarounds — Claude decides |
 | `tool_chain` (Read/Grep/Glob) | Aggressive Trim | Exploration results, keep only findings |
 | `tool_chain` (Edit/Write) | Moderate Trim | Preserve what changed and why |
-| `tool_chain` (Bash with git diff) | Aggressive Trim | Summarize files changed |
+| `git_diff` | Aggressive Trim | Summarize files changed |
 | `task_result` | Aggressive Trim | Subagent results, keep outcome only |
 | `conversation` | Evaluate | May be critical decisions or casual chat |
-| (final segment) | Always Keep | Last assistant response before compaction |
+| (final segment) | Always Keep | Last non-Always-Drop segment before compaction |
 
 ### Always Drop
-- **Thinking blocks** (`<thinking>` tags) — internal reasoning, never needed on resume
+- **Thinking blocks** (message content blocks with `"type": "thinking"`) — internal reasoning, never needed on resume
 - **Progress entries** — streaming markers with no content
 
 ### Always Keep
 - **Context header** — first segment of conversation (see "Context Header Definition" below)
 - **Existing compact boundaries** — preserve prior compaction markers
-- **Final segment** — the last thing Claude said before compaction
+- **Final segment** — the last segment that is not an Always Drop type
 - **User preference statements** — explicit user instructions about workflow (if Claude identifies them during evaluation)
 
 ### Aggressive Trim (summarize to ~1-2 sentences)
@@ -284,14 +298,14 @@ compact-discover.py <WATERMARK_UUID> [--pid <PID>]
    - If not found after retries → exit 2
 2. Extract session_id from filename (filename IS the session ID)
 3. Extract project_slug from parent directory name
-4. Parse last few JSONL entries for cwd, version metadata
+4. Parse tail JSONL entries for cwd metadata
 5. If `--pid` provided:
    - Walk process tree upward from PID via `/proc/$PID/status` (Linux) or `ps -o ppid=` (macOS fallback)
    - Identify terminal binary (kitty, gnome-terminal, wezterm, alacritty, etc.)
    - Map to launch template from built-in lookup table, substituting `cwd` from JSONL metadata
-   - If terminal not recognized → `"terminal": "unknown"`, `"terminal_launch": null`
+   - If terminal not recognized → `"terminal": null`, `"terminal_launch": null`
 
-**Exit codes:** 0=success, 1=bad args, 2=watermark not found, 3=PID/process tree error
+**Exit codes:** 0=success, 1=bad args, 2=watermark not found, 3=terminal not found (`--detect-terminal` mode only)
 
 ---
 
@@ -315,7 +329,7 @@ Output is a JSON manifest containing:
 - Segments array, each containing:
   - `id`, `type`, `description`
   - `interaction_group_id` — links related segments (e.g., a user message, its tool calls, and the assistant response)
-  - `line_range`, `entry_count`, `chain_entry_count`
+  - `line_range`, `chain_entry_count`
   - `estimated_tokens` (len/4 approximation)
   - `content_preview` (first ~200 chars)
   - `entry_uuids` (list of all chain entry UUIDs in segment)
@@ -328,8 +342,8 @@ Output is a JSON manifest containing:
 - `tool_chain` — built-in tool use/result pairs (Read, Edit, Write, Grep, Glob, Bash, etc.)
 - `mcp_chain` — MCP tool use/result pairs (name starts with `mcp__`)
 - `task_result` — Task tool use + large subagent result
-- `thinking` — assistant entry containing `<thinking>` tags
-- `error_chain` — tool results with `is_error: true` or stderr content
+- `thinking` — assistant entry containing thinking content blocks
+- `error_chain` — tool results with `is_error: true`
 - `boundary` — compact_boundary system entries
 - `git_diff` — Bash tool results containing diff output (detected by `diff --git` or `@@` markers)
 - `progress` — streaming progress markers with no content
@@ -341,7 +355,8 @@ Note: the `mixed` type from earlier drafts is eliminated. Hyper-granular segment
 2. Classify each chain entry by structural type:
    - `user` with text content → `conversation`
    - `assistant` with text content (no tool_use) → `conversation`
-   - `assistant` with `<thinking>` in content → `thinking`
+   - `assistant` with thinking content blocks and no user-visible text → `thinking`
+   - `assistant` with both thinking and non-empty text → `conversation` (preserve text)
    - `assistant` with `tool_use` where name starts `mcp__` → `mcp_chain`
    - `assistant` with `tool_use` name=`Task` → `task_result`
    - `assistant` with `tool_use` (built-in) → `tool_chain`
@@ -354,7 +369,7 @@ Note: the `mixed` type from earlier drafts is eliminated. Hyper-granular segment
 4. Assign `interaction_group_id`: increment the group ID each time a new `user` text message (non-tool-result) appears. All entries between two user text messages share a group.
 5. Context header: first interaction group(s) per rules.md definition
 6. Token estimation: `len(text_content) / 4` per entry, summed per segment
-7. Non-chain entry association: for each non-chain entry (file-history-snapshot, turn_duration, etc.), assign it to the segment whose chain entries' line range contains it. Entries between segments default to the preceding segment.
+7. Non-chain entry association: for each non-chain entry (file-history-snapshot, summary, etc.), assign it to the segment whose chain entries' line range contains it. Entries between segments default to the preceding segment.
 
 **Mode 2 — Read segment (`--read-segment`):**
 
@@ -380,7 +395,7 @@ compact-splice.py <SESSION_ID> --cut-plan <PATH_TO_PLAN_JSON>
   "session_id": "...",
   "actions": [
     {"segment_id": 1, "action": "keep"},
-    {"segment_id": 2, "action": "summarize", "summary_file": "/tmp/smart-compact/summary-2.txt"},
+    {"segment_id": 2, "action": "summarize", "summary_file": "/tmp/smart-compact/$SESSION_ID/summary-2.txt"},
     {"segment_id": 3, "action": "drop"},
     {"segment_id": 4, "action": "keep"}
   ]
@@ -392,7 +407,7 @@ Summary text is stored in sidecar files (one per summarized segment) rather than
 **Algorithm (re-synthesis):**
 1. Parse original JSONL
 2. Walk full chain root → leaf
-3. **Safety check**: scan for unknown entry types. If any entry has a `type` not in the known set (`user`, `assistant`, `progress`, `system`, `file-history-snapshot`, `summary`, `turn_duration`), log a warning. If the unknown type has a `uuid` (participates in chain), abort with exit code 4 — the JSONL format may have changed.
+3. **Safety check**: scan for unknown entry types. If any entry has a `type` not in the known set (`user`, `assistant`, `progress`, `system`, `file-history-snapshot`, `summary`, `saved_hook_context`, `queue-operation`, `pr-link`), log a warning. If the unknown type has a `uuid` (participates in chain), abort with exit code 4 — the JSONL format may have changed.
 4. Load cut-plan and segment manifest (from compact-analyze.py cache or re-derive)
 5. Build new chain in memory:
    - `keep`: copy all chain entries, preserve original UUIDs
@@ -407,14 +422,14 @@ Summary text is stored in sidecar files (one per summarized segment) rather than
    - Non-chain entries in `drop`/`summarize` segments → discarded
    - Non-chain entries between segments (not claimed by any segment) → preserved
 8. Merge chain + kept non-chain entries, sorted by original line position
-9. Create timestamped backup (`.jsonl.bak-YYYYMMDD-HHMMSS-<random4>`) — random suffix prevents collision in rapid successive runs
-10. Write new file atomically (temp file → rename)
-11. Verify new chain:
+9. Verify new chain in-memory before writing:
     - All `keep` segment UUIDs reachable from leaf
-    - All summary pair UUIDs reachable
+    - Generated summary entries present (`all_summaries_present`)
+    - Original UUIDs from summarized segments absent (`summarized_uuids_absent`)
     - No `drop` segment UUIDs reachable
-    - Chain is continuous (no broken pointers)
-    - Turn alternation: no consecutive same-role messages in chain
+    - Turn alternation flag is informational only (`turn_alternation_ok`)
+10. On verification success: create timestamped backup (`.jsonl.bak-YYYYMMDD-HHMMSS-<random4>`) and write atomically (temp file → rename)
+11. On verification failure: do not write
 
 **Output (JSON to stdout):**
 ```json
@@ -433,8 +448,10 @@ Summary text is stored in sidecar files (one per summarized segment) rather than
     "ok": true,
     "new_chain_length": 180,
     "all_keeps_reachable": true,
-    "all_summaries_reachable": true,
-    "no_drops_reachable": true
+    "all_summaries_present": true,
+    "summarized_uuids_absent": true,
+    "no_drops_reachable": true,
+    "turn_alternation_ok": true
   }
 }
 ```
@@ -470,7 +487,7 @@ For orchestrated relaunch, the compactor needs to know how to open a new termina
 | kitty | `kitty --directory {cwd} -- {command}` |
 | gnome-terminal | `gnome-terminal --working-directory={cwd} -- {command}` |
 | wezterm | `wezterm start --cwd {cwd} -- {command}` |
-| alacritty | `alacritty --working-directory {cwd} -e {command}` |
+| alacritty | `alacritty --working-directory {cwd} -- {command}` |
 | konsole | `konsole --workdir {cwd} -e {command}` |
 | xterm | `xterm -e {command}` |
 
@@ -509,7 +526,7 @@ When the compactor launches a resumed session and then exits, the child process 
 11. **Token cost tracking** — Python estimates tokens per segment so Claude can prioritize high-cost targets.
 12. **Context budget safety valve** — Auto-collapse old segments when evaluation load exceeds compactor capacity.
 13. **Graceful degradation** — If terminal detection fails, falls back to manual resume command.
-14. **Watermark verification before kill** — Compactor confirms the calling session's watermark is flushed to disk before sending SIGTERM, preventing data loss.
+14. **PID verification before kill** — Compactor verifies the orchestrated PID still maps to a Claude process before signaling.
 15. **Graceful kill with escalation** — SIGTERM first with 10s grace period, SIGKILL only as last resort. Allows Claude Code to flush buffers.
 16. **Unknown entry type safety** — Splicer aborts if it encounters unknown chain-participating entry types, protecting against JSONL format changes.
 

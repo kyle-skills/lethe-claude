@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-smart-compact: Structural Analysis — JSONL → Segment Manifest
+Lethe: Structural Analysis — JSONL → Segment Manifest
 
 Parses a Claude Code session's JSONL, walks the parentUuid chain, classifies
 entries by structural type, groups them into segments, and produces a JSON
 manifest for the compactor's semantic decision phase.
 
 Usage:
-    compact-analyze.py <SESSION_ID> [--project-slug <SLUG>]
-    compact-analyze.py <SESSION_ID> --read-segment <SEGMENT_ID> [--project-slug <SLUG>]
+    lethe-analyze.py <SESSION_ID> [--project-slug <SLUG>]
+    lethe-analyze.py <SESSION_ID> --read-segment <SEGMENT_ID> [--project-slug <SLUG>]
 
 Exit codes:
     0 = success
@@ -24,13 +24,12 @@ import json
 import sys
 from pathlib import Path
 
-from compact_utils import (
+from lethe_utils import (
     associate_non_chain_lines,
     build_segments,
     find_jsonl,
     get_session_metadata,
     get_text_content,
-    is_chain_entry,
     parse_jsonl,
     walk_chain,
 )
@@ -46,26 +45,43 @@ def identify_context_header(segments: list[dict]) -> None:
 
     Context header: everything from start until the first tool_chain or mcp_chain
     that is NOT immediately preceded by a conversation segment in the same
-    interaction group.
+    interaction group. thinking/progress segments are skipped during boundary
+    detection (they remain Always Drop; header promotion should not override).
 
+    Priority: content boundary > minimum group > maximum cap.
     Min: first interaction group (but capped by max).
     Max: first 10% of segments (at least 1).
     """
     if not segments:
         return
 
+    # Guard: don't re-run on already-identified headers
+    if segments[0]["type"] == "context_header":
+        return
+
     max_header_segments = max(1, len(segments) // 10)
     first_group = segments[0].get("interaction_group_id")
 
-    # Find header boundary by content rules
-    header_end = 0
+    # Find header boundary by content rules.
+    # header_end = -1 means no segments matched yet (vs 0 which is a valid index).
+    # Skip thinking/progress segments — they are Always Drop and should not
+    # be promoted to context_header (Always Keep).
+    header_end = -1
     for i, seg in enumerate(segments):
         if i >= max_header_segments:
             break
 
+        # Skip Always Drop types — they don't affect header boundary detection
+        if seg["type"] in ("thinking", "progress"):
+            continue
+
         if seg["type"] in ("tool_chain", "mcp_chain"):
-            if i > 0 and segments[i - 1]["type"] == "conversation" \
-               and segments[i - 1]["interaction_group_id"] == seg["interaction_group_id"]:
+            # Find the previous non-thinking/progress segment
+            prev_idx = i - 1
+            while prev_idx >= 0 and segments[prev_idx]["type"] in ("thinking", "progress"):
+                prev_idx -= 1
+            if prev_idx >= 0 and segments[prev_idx]["type"] == "conversation" \
+               and segments[prev_idx]["interaction_group_id"] == seg["interaction_group_id"]:
                 header_end = i
                 continue
             break
@@ -80,10 +96,15 @@ def identify_context_header(segments: list[dict]) -> None:
         first_group_end = i
 
     # Minimum overrides content rules, but max always caps
+    if header_end < 0:
+        header_end = 0  # at minimum, first segment is header
     header_end = min(max(header_end, first_group_end), max_header_segments - 1)
 
-    # Mark header segments (preserve original type for reference)
+    # Mark header segments (preserve original type for reference).
+    # Skip thinking/progress — they keep their type for Always Drop treatment.
     for i in range(header_end + 1):
+        if segments[i]["type"] in ("thinking", "progress"):
+            continue
         segments[i]["original_type"] = segments[i]["type"]
         segments[i]["type"] = "context_header"
 
@@ -92,9 +113,10 @@ def build_content_preview(entries: list[tuple[int, dict]], max_len: int = 200) -
     """Build a preview string from the first text content in entries."""
     for _, entry in entries:
         text = get_text_content(entry)
-        if text.strip():
-            preview = text.strip()[:max_len]
-            if len(text.strip()) > max_len:
+        stripped = text.strip()
+        if stripped:
+            preview = stripped[:max_len]
+            if len(stripped) > max_len:
                 preview += "..."
             return preview
     return ""
@@ -167,9 +189,12 @@ def build_manifest(
             seg_dict["original_type"] = seg["original_type"]
         seg_output.append(seg_dict)
 
+    # Strip sessionId from metadata — redundant with top-level session_id
+    manifest_metadata = {k: v for k, v in metadata.items() if k != "sessionId"}
+
     return {
         "session_id": session_id,
-        "metadata": metadata,
+        "metadata": manifest_metadata,
         "total_lines": len(lines),
         "chain_length": len(chain),
         "estimated_tokens": total_tokens,
@@ -181,7 +206,7 @@ def build_manifest(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="smart-compact: Structural analysis — JSONL → segment manifest"
+        description="Lethe: Structural analysis — JSONL → segment manifest"
     )
     parser.add_argument("session_id", help="Session ID to analyze")
     parser.add_argument(
@@ -203,6 +228,10 @@ def main():
 
     args = parser.parse_args()
 
+    if args.read_segment is not None and args.read_segment < 1:
+        print(json.dumps({"error": "Segment IDs start at 1"}), file=sys.stderr)
+        sys.exit(EXIT_BAD_ARGS)
+
     # Find and parse JSONL
     try:
         if args.jsonl_path:
@@ -216,7 +245,11 @@ def main():
         sys.exit(EXIT_FILE_NOT_FOUND)
 
     lines = parse_jsonl(jsonl_path)
-    chain = walk_chain(lines)
+    try:
+        chain = walk_chain(lines)
+    except ValueError as e:
+        print(json.dumps({"error": str(e)}), file=sys.stderr)
+        sys.exit(EXIT_FILE_NOT_FOUND)
     metadata = get_session_metadata(lines)
 
     # Build segments
@@ -239,25 +272,28 @@ def main():
             )
             sys.exit(EXIT_SEGMENT_NOT_FOUND)
 
-        # Return raw entry objects for this segment
-        output = []
-        for line_idx, entry in target["entries"]:
-            output.append(entry)
-        print(json.dumps(output, indent=2, default=str))
+        # Return raw chain entry objects for this segment. Non-chain entries
+        # (progress markers, metadata) are excluded — they are structural
+        # artifacts, not content the compactor needs for evaluation.
+        output = [entry for _, entry in target["entries"]]
+        print(json.dumps(output, indent=2))
         sys.exit(EXIT_SUCCESS)
 
     # Mode 1: Full manifest
     manifest = build_manifest(
         args.session_id, lines, chain, segments, metadata,
     )
-    # default=str handles datetime objects that may appear in metadata
     if args.output:
         output_path = Path(args.output)
-        with open(output_path, "w") as f:
-            json.dump(manifest, f, indent=2, default=str)
+        try:
+            with open(output_path, "w") as f:
+                json.dump(manifest, f, indent=2)
+        except OSError as e:
+            print(json.dumps({"error": f"Cannot write to {output_path}: {e}"}), file=sys.stderr)
+            sys.exit(EXIT_BAD_ARGS)
         print(str(output_path))
     else:
-        print(json.dumps(manifest, indent=2, default=str))
+        print(json.dumps(manifest, indent=2))
     sys.exit(EXIT_SUCCESS)
 
 

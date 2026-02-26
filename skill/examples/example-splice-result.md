@@ -1,15 +1,15 @@
-<skill name="smart-compact-example-splice-result" version="1.0">
+<skill name="lethe-example-splice-result" version="1.0">
 
 <metadata>
 type: example
-parent-skill: smart-compact
+parent-skill: lethe
 tier: 3
 </metadata>
 
 <core>
 # Example Splice Result
 
-This example shows the JSON result produced by `compact-splice.py`, with a
+This example shows the JSON result produced by `lethe-splice.py`, with a
 reading guide for the nested verification structure.
 
 ## Success Case
@@ -80,7 +80,7 @@ top-level `ok` mirrors the verification `ok`, but the nested object provides
 diagnostic detail on failure.
 
 - **`all_keeps_reachable`**: Every UUID from kept segments is in the new chain. If false: a kept entry was lost during re-synthesis.
-- **`all_summaries_present`**: Summary user entries (`[smart-compact summary]` prefix) match the number of summarized segments. If false: a summary pair was not emitted.
+- **`all_summaries_present`**: Summary user entries (`[lethe summary]` prefix) match the number of summarized segments. If false: a summary pair was not emitted.
 - **`summarized_uuids_absent`**: Original UUIDs from summarized segments are NOT in the new chain. If false: an original entry was kept alongside its summary.
 - **`no_drops_reachable`**: UUIDs from dropped segments are NOT in the new chain. If false: a dropped entry leaked through.
 - **`turn_alternation_ok`**: No consecutive same-role messages. **Informational only** — this check does not affect the `ok` flag. Pre-compacted sessions may legitimately have consecutive user entries from Claude Code's built-in `/compact`.

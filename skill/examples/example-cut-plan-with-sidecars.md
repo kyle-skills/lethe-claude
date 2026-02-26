@@ -1,8 +1,8 @@
-<skill name="smart-compact-example-cut-plan" version="1.0">
+<skill name="lethe-example-cut-plan" version="1.0">
 
 <metadata>
 type: example
-parent-skill: smart-compact
+parent-skill: lethe
 tier: 3
 </metadata>
 
@@ -14,7 +14,7 @@ all three action types: KEEP, DROP, and SUMMARIZE.
 
 ## Cut-Plan JSON
 
-Written to `/tmp/smart-compact/a1b2c3d4-5678-9abc-def0-123456789abc/cut-plan.json`:
+Written to `/tmp/lethe/a1b2c3d4-5678-9abc-def0-123456789abc/cut-plan.json`:
 
 ```json
 {
@@ -22,13 +22,13 @@ Written to `/tmp/smart-compact/a1b2c3d4-5678-9abc-def0-123456789abc/cut-plan.jso
   "actions": [
     {"segment_id": 1, "action": "keep"},
     {"segment_id": 2, "action": "drop"},
-    {"segment_id": 3, "action": "summarize", "summary_file": "/tmp/smart-compact/a1b2c3d4-5678-9abc-def0-123456789abc/summary-3.txt"},
+    {"segment_id": 3, "action": "summarize", "summary_file": "/tmp/lethe/a1b2c3d4-5678-9abc-def0-123456789abc/summary-3.txt"},
     {"segment_id": 4, "action": "drop"},
-    {"segment_id": 5, "action": "summarize", "summary_file": "/tmp/smart-compact/a1b2c3d4-5678-9abc-def0-123456789abc/summary-5.txt"},
+    {"segment_id": 5, "action": "summarize", "summary_file": "/tmp/lethe/a1b2c3d4-5678-9abc-def0-123456789abc/summary-5.txt"},
     {"segment_id": 6, "action": "keep"},
     {"segment_id": 7, "action": "drop"},
-    {"segment_id": 8, "action": "summarize", "summary_file": "/tmp/smart-compact/a1b2c3d4-5678-9abc-def0-123456789abc/summary-8.txt"},
-    {"segment_id": 9, "action": "summarize", "summary_file": "/tmp/smart-compact/a1b2c3d4-5678-9abc-def0-123456789abc/summary-9.txt"},
+    {"segment_id": 8, "action": "summarize", "summary_file": "/tmp/lethe/a1b2c3d4-5678-9abc-def0-123456789abc/summary-8.txt"},
+    {"segment_id": 9, "action": "summarize", "summary_file": "/tmp/lethe/a1b2c3d4-5678-9abc-def0-123456789abc/summary-9.txt"},
     {"segment_id": 10, "action": "drop"},
     {"segment_id": 11, "action": "keep"},
     {"segment_id": 12, "action": "keep"}
@@ -55,25 +55,25 @@ Written to `/tmp/smart-compact/a1b2c3d4-5678-9abc-def0-123456789abc/cut-plan.jso
 
 ## Sidecar Summary Files
 
-### `/tmp/smart-compact/.../summary-3.txt` (Aggressive Trim)
+### `/tmp/lethe/.../summary-3.txt` (Aggressive Trim)
 
 ```
 Explored backend/src/ for authentication middleware. Found JWT validation in auth.ts and session management in session-store.ts.
 ```
 
-### `/tmp/smart-compact/.../summary-5.txt` (Moderate Trim)
+### `/tmp/lethe/.../summary-5.txt` (Moderate Trim)
 
 ```
 Implemented rate limiting middleware in backend/src/middleware/rate-limiter.ts. Added per-endpoint configuration with defaults of 100 req/min for API routes and 20 req/min for auth routes. Updated server.ts to register the middleware before route handlers. Added rate limit headers (X-RateLimit-Remaining, X-RateLimit-Reset) to all responses.
 ```
 
-### `/tmp/smart-compact/.../summary-8.txt` (Aggressive Trim)
+### `/tmp/lethe/.../summary-8.txt` (Aggressive Trim)
 
 ```
 Queried local-rag for authentication patterns. Found existing JWT implementation uses RS256 with 15-minute expiry.
 ```
 
-### `/tmp/smart-compact/.../summary-9.txt` (Aggressive Trim)
+### `/tmp/lethe/.../summary-9.txt` (Aggressive Trim)
 
 ```
 Modified rate-limiter.ts and server.ts: added sliding window algorithm, per-IP tracking, and configurable whitelist.
@@ -81,8 +81,8 @@ Modified rate-limiter.ts and server.ts: added sliding window algorithm, per-IP t
 
 ## Key Points
 
-- Summary text does NOT include the `[smart-compact summary]` prefix — the splicer adds that
-- All sidecar files use the session-scoped path under `/tmp/smart-compact/<session_id>/`
+- Summary text does NOT include the `[lethe summary]` prefix — the splicer adds that
+- All sidecar files use the session-scoped path under `/tmp/lethe/<session_id>/`
 - Aggressive Trim summaries are 1-2 sentences regardless of original segment size
 - Moderate Trim summaries are 3-5 sentences preserving what changed and why
 - Every segment in the manifest has a corresponding action — none are skipped

@@ -1,18 +1,21 @@
-<skill name="smart-compact-example-manifest" version="1.0">
+<skill name="lethe-example-manifest" version="1.0">
 
 <metadata>
 type: example
-parent-skill: smart-compact
+parent-skill: lethe
 tier: 3
 </metadata>
 
 <core>
 # Example Segment Manifest
 
-This example shows the JSON manifest produced by `compact-analyze.py` for a
+This example shows the JSON manifest produced by `lethe-analyze.py` for a
 realistic session, with a reading guide for field interpretation.
 
 ## Manifest JSON (abbreviated)
+
+Note: real manifests have contiguous segment IDs (`1..N`). This abbreviated
+example intentionally shows only a subset of segments for readability.
 
 ```json
 {
@@ -109,6 +112,7 @@ realistic session, with a reading guide for field interpretation.
 - **`type_distribution`**: Quick overview of session shape — many `tool_chain` segments suggest heavy implementation work
 
 ### Per-Segment Fields
+- **`id`**: 1-based segment identifier used by cut-plans (`segment_id` must start at 1)
 - **`type`**: Structural classification. Look up in the rules.md mapping table to determine the default compaction rule
 - **`original_type`**: Only present on `context_header` segments — shows what the type would have been without header promotion
 - **`interaction_group_id`**: Groups entries between user text messages. Segments with the same ID belong to the same user-assistant exchange. Useful for understanding conversation flow

@@ -1,5 +1,5 @@
 {
-  "name": "smart-compact",
-  "description": "Intelligent JSONL compaction for Claude Code sessions",
+  "name": "lethe",
+  "description": "Surgical context compaction — a measured sip from the river of forgetfulness",
   "version": "1.0.0"
 }
