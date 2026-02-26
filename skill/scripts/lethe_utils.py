@@ -483,6 +483,29 @@ def get_session_metadata(lines: list[dict]) -> dict:
     return metadata
 
 
+def _parse_lethe_config(path: Path) -> dict:
+    """Parse a .lethe_config file into a dict of raw string values.
+
+    Format: flat key=value, one per line. Comments (#) and empty lines skipped.
+    Lines without '=' are skipped. No whitespace trimming around '='.
+    Unknown keys are included (forward-compatible).
+    Returns empty dict if file doesn't exist or can't be read.
+    """
+    result = {}
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            result[key] = value
+    except OSError:
+        pass
+    return result
+
+
 def _validate_permission(key: str, value: str) -> str | None:
     """Validate a permission mode value.
 
