@@ -10,7 +10,7 @@ from unittest.mock import patch
 # Add scripts dir to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "skill" / "scripts"))
 
-from lethe_utils import _parse_lethe_config, _validate_permission
+from lethe_utils import _parse_lethe_config, _validate_permission, resolve_config
 
 
 class TestValidatePermission(unittest.TestCase):
@@ -83,6 +83,91 @@ class TestParseLetheConfig(unittest.TestCase):
         # "compactor_permission " (with space) as key, not "compactor_permission"
         self.assertNotIn("compactor_permission", result)
         path.unlink()
+
+
+class TestResolveConfig(unittest.TestCase):
+    def setUp(self):
+        for var in ("LETHE_COMPACTOR_PERMISSION", "LETHE_RESUME_PERMISSION"):
+            os.environ.pop(var, None)
+
+    def tearDown(self):
+        for var in ("LETHE_COMPACTOR_PERMISSION", "LETHE_RESUME_PERMISSION"):
+            os.environ.pop(var, None)
+
+    def test_defaults_no_config(self):
+        result = resolve_config()
+        self.assertEqual(result["compactor_permission"], "acceptEdits")
+        self.assertIsNone(result["resume_permission"])
+
+    def test_env_var_compactor(self):
+        os.environ["LETHE_COMPACTOR_PERMISSION"] = "bypassPermissions"
+        result = resolve_config()
+        self.assertEqual(result["compactor_permission"], "bypassPermissions")
+
+    def test_env_var_resume(self):
+        os.environ["LETHE_RESUME_PERMISSION"] = "acceptEdits"
+        result = resolve_config()
+        self.assertEqual(result["resume_permission"], "acceptEdits")
+
+    def test_invalid_env_var_falls_back_to_default(self):
+        os.environ["LETHE_COMPACTOR_PERMISSION"] = "bogus"
+        result = resolve_config()
+        self.assertEqual(result["compactor_permission"], "acceptEdits")
+
+    def test_project_config_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = Path(tmpdir) / ".lethe_config"
+            config.write_text("compactor_permission=bypassPermissions\nresume_permission=acceptEdits\n")
+            result = resolve_config(project_dir=tmpdir)
+            self.assertEqual(result["compactor_permission"], "bypassPermissions")
+            self.assertEqual(result["resume_permission"], "acceptEdits")
+
+    def test_env_overrides_project_config(self):
+        os.environ["LETHE_COMPACTOR_PERMISSION"] = "acceptEdits"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = Path(tmpdir) / ".lethe_config"
+            config.write_text("compactor_permission=bypassPermissions\n")
+            result = resolve_config(project_dir=tmpdir)
+            self.assertEqual(result["compactor_permission"], "acceptEdits")  # env wins
+
+    def test_home_config_as_fallback(self):
+        with tempfile.TemporaryDirectory() as fake_home:
+            config = Path(fake_home) / ".lethe_config"
+            config.write_text("resume_permission=bypassPermissions\n")
+            with patch("lethe_utils.Path.home", return_value=Path(fake_home)):
+                result = resolve_config()
+                self.assertEqual(result["resume_permission"], "bypassPermissions")
+
+    def test_project_overrides_home(self):
+        with tempfile.TemporaryDirectory() as proj_dir, \
+             tempfile.TemporaryDirectory() as fake_home:
+            (Path(proj_dir) / ".lethe_config").write_text("resume_permission=acceptEdits\n")
+            (Path(fake_home) / ".lethe_config").write_text("resume_permission=bypassPermissions\n")
+            with patch("lethe_utils.Path.home", return_value=Path(fake_home)):
+                result = resolve_config(project_dir=proj_dir)
+                self.assertEqual(result["resume_permission"], "acceptEdits")  # project wins
+
+    def test_mixed_sources(self):
+        """Env sets compactor, home config sets resume."""
+        os.environ["LETHE_COMPACTOR_PERMISSION"] = "bypassPermissions"
+        with tempfile.TemporaryDirectory() as fake_home:
+            (Path(fake_home) / ".lethe_config").write_text("resume_permission=acceptEdits\n")
+            with patch("lethe_utils.Path.home", return_value=Path(fake_home)):
+                result = resolve_config()
+                self.assertEqual(result["compactor_permission"], "bypassPermissions")
+                self.assertEqual(result["resume_permission"], "acceptEdits")
+
+    def test_early_termination_skips_lower_priority(self):
+        """When both keys resolved from env, no file reading needed."""
+        os.environ["LETHE_COMPACTOR_PERMISSION"] = "bypassPermissions"
+        os.environ["LETHE_RESUME_PERMISSION"] = "acceptEdits"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / ".lethe_config").write_text(
+                "compactor_permission=acceptEdits\nresume_permission=bypassPermissions\n"
+            )
+            result = resolve_config(project_dir=tmpdir)
+            self.assertEqual(result["compactor_permission"], "bypassPermissions")
+            self.assertEqual(result["resume_permission"], "acceptEdits")
 
 
 if __name__ == "__main__":

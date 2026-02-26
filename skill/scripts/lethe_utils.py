@@ -10,6 +10,7 @@ the single source of truth for core data structures and classification logic.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -481,6 +482,77 @@ def get_session_metadata(lines: list[dict]) -> dict:
         if all(v is not None for v in metadata.values()):
             break
     return metadata
+
+
+# Config keys and their corresponding env vars
+_CONFIG_KEYS = {
+    "compactor_permission": "LETHE_COMPACTOR_PERMISSION",
+    "resume_permission": "LETHE_RESUME_PERMISSION",
+}
+
+# Defaults applied when resolution completes without finding a value
+_CONFIG_DEFAULTS = {
+    "compactor_permission": "acceptEdits",
+    "resume_permission": None,
+}
+
+
+def resolve_config(project_dir: str | None = None) -> dict:
+    """Resolve Lethe permission configuration from env vars and config files.
+
+    Resolution order (per key, first match wins):
+    1. Environment variable (LETHE_COMPACTOR_PERMISSION, LETHE_RESUME_PERMISSION)
+    2. Project-level .lethe_config (in project_dir)
+    3. User-level .lethe_config (in $HOME)
+    4. Hardcoded default (acceptEdits for compactor, None for resume)
+
+    Returns: {"compactor_permission": str, "resume_permission": str | None}
+    """
+    result: dict[str, str | None] = {k: None for k in _CONFIG_KEYS}
+    resolved: set[str] = set()
+
+    # 1. Environment variables
+    for key, env_var in _CONFIG_KEYS.items():
+        raw = os.environ.get(env_var, "").strip()
+        if raw:
+            validated = _validate_permission(key, raw)
+            if validated is not None:
+                result[key] = validated
+                resolved.add(key)
+
+    if len(resolved) == len(_CONFIG_KEYS):
+        return result
+
+    # 2. Project-level .lethe_config
+    if project_dir:
+        project_config = Path(project_dir) / ".lethe_config"
+        parsed = _parse_lethe_config(project_config)
+        for key in _CONFIG_KEYS:
+            if key not in resolved and key in parsed:
+                validated = _validate_permission(key, parsed[key])
+                if validated is not None:
+                    result[key] = validated
+                    resolved.add(key)
+
+    if len(resolved) == len(_CONFIG_KEYS):
+        return result
+
+    # 3. User-level .lethe_config
+    home_config = Path.home() / ".lethe_config"
+    parsed = _parse_lethe_config(home_config)
+    for key in _CONFIG_KEYS:
+        if key not in resolved and key in parsed:
+            validated = _validate_permission(key, parsed[key])
+            if validated is not None:
+                result[key] = validated
+                resolved.add(key)
+
+    # 4. Apply defaults for any still-unresolved keys
+    for key in _CONFIG_KEYS:
+        if key not in resolved:
+            result[key] = _CONFIG_DEFAULTS[key]
+
+    return result
 
 
 def _parse_lethe_config(path: Path) -> dict:
