@@ -481,3 +481,17 @@ def get_session_metadata(lines: list[dict]) -> dict:
         if all(v is not None for v in metadata.values()):
             break
     return metadata
+
+
+def _validate_permission(key: str, value: str) -> str | None:
+    """Validate a permission mode value.
+
+    Returns the value if valid, None if invalid (with a warning to stderr).
+    Uses an explicit allowlist — invalid input never escalates permissions.
+    """
+    match value:
+        case "acceptEdits" | "bypassPermissions":
+            return value
+        case _:
+            print(f"Warning: invalid value '{value}' for {key}, using default", file=sys.stderr)
+            return None
