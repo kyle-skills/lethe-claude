@@ -59,7 +59,7 @@ TERMINAL_TEMPLATES = {
     "xterm": "xterm -e {command}",  # xterm has no working-directory flag; caller must cd
     "foot": "foot --working-directory={cwd} {command}",
     "ghostty": "ghostty -e {command}",  # ghostty uses cwd of parent process
-    "st": "st -d {cwd} -e {command}",
+    "st": "st -e sh -c 'cd {cwd} && exec {command}'",
     "urxvt": "urxvt -cd {cwd} -e {command}",
 }
 
@@ -278,6 +278,11 @@ def main():
         metavar="PID",
         help="Terminal-only mode: detect terminal for the given PID and exit",
     )
+    parser.add_argument(
+        "--cwd",
+        default=None,
+        help="Working directory for terminal launch (quoted internally). Used with --detect-terminal.",
+    )
 
     args = parser.parse_args()
 
@@ -289,11 +294,13 @@ def main():
             "terminal_launch": None,
         }
         if terminal_name:
-            # Output template with literal {cwd} and {command} placeholders
-            # for the caller to substitute with actual values
-            result["terminal_launch"] = TERMINAL_TEMPLATES[terminal_name].format(
-                cwd="{cwd}", command="{command}"
-            )
+            template = TERMINAL_TEMPLATES[terminal_name]
+            if args.cwd:
+                result["terminal_launch"] = template.replace(
+                    "{cwd}", shlex.quote(args.cwd)
+                )
+            else:
+                result["terminal_launch"] = template
         print(json.dumps(result, indent=2))
         sys.exit(EXIT_SUCCESS if terminal_name else EXIT_WATERMARK_NOT_FOUND)
 
