@@ -62,6 +62,35 @@ When installed, Lethe can also trigger proactively during long sessions:
 - Otherwise, it asks permission when context usage exceeds 70%.
 - If declined, it won't ask again until 85%.
 
+## Configuration
+
+Lethe reads settings from a layered config model. For each key, the first match wins:
+
+1. Environment variable
+2. Project-level `.lethe_config` (in project root)
+3. User-level `.lethe_config` (in `$HOME`)
+4. Hardcoded default
+
+| Setting | Env var | Config key | Default | Description |
+|---|---|---|---|---|
+| Compact size | `LETHE_COMPACT_SIZE` | `compact_size` | `400000` | Maximum estimated tokens after splice |
+| Compactor permission | `LETHE_COMPACTOR_PERMISSION` | `compactor_permission` | `acceptEdits` | Permission mode for the compactor session |
+| Resume permission | `LETHE_RESUME_PERMISSION` | `resume_permission` | *(no flag)* | Permission mode for the resumed session |
+
+`compact_size` sets the ceiling below which Lethe considers a sip successful. If the spliced result's estimated token count exceeds this threshold, the candidate is discarded and Lethe routes to a standard compact fallback instead (see [When the Sip Is Too Small](#when-the-sip-is-too-small)). Permission modes control `--permission-mode` on launched Claude Code sessions — valid values are `acceptEdits` and `bypassPermissions`.
+
+Invalid values for any key produce a warning on stderr and fall back to the safe default. Misconfiguration never silently changes behavior or escalates permissions.
+
+Example `.lethe_config`:
+```
+# Project-level Lethe configuration
+compact_size=300000
+compactor_permission=bypassPermissions
+resume_permission=acceptEdits
+```
+
+Keys use the same names as the env vars without the `LETHE_` prefix. One key=value per line, `#` comments, no whitespace around `=`.
+
 ## How It Works
 
 Lethe splits the work between Python (fast structural analysis) and Claude (semantic judgment):
@@ -83,18 +112,49 @@ Lethe splits the work between Python (fast structural analysis) and Claude (sema
                        ▼
 ┌─────────────────────────────────────────────────────────┐
 │                    Python (Splicer)                       │
-│  Load cut-plan → Re-synthesize JSONL → Rewrite chain     │
-│  → Verify integrity → Atomic write with backup           │
+│  Load cut-plan → Re-synthesize into working copy →       │
+│  Rewrite chain → Verify integrity → Estimate tokens      │
+└──────────────────────┬──────────────────────────────────┘
+                       │ working copy + token estimate
+                       ▼
+┌─────────────────────────────────────────────────────────┐
+│                    Compact-Size Gate                      │
+│  Estimated tokens ≤ compact_size?                        │
+│  YES → Backup original, promote working copy             │
+│  NO  → Discard candidate, route to standard compact      │
 └─────────────────────────────────────────────────────────┘
 ```
 
-### The five phases
+Token estimates throughout the pipeline use a conservative `/3` ratio — one token per three characters. This intentionally overestimates to ensure the compact-size gate errs on the side of caution.
+
+### The six phases
 
 1. **Kill** — Gracefully terminates the target session (SIGTERM → grace period → SIGKILL only if needed). Skipped for manual compaction.
 2. **Analyze** — `lethe-analyze.py` parses the JSONL, walks the `parentUuid` chain, classifies every entry, groups them into typed segments, and outputs a manifest.
 3. **Decide** — Claude reads the manifest, applies the rules table segment-by-segment, reads ambiguous segments for evaluation, writes summaries for segments marked SUMMARIZE, and produces a cut-plan.
-4. **Splice** — `lethe-splice.py` re-synthesizes the JSONL from the cut-plan. Kept entries preserve their original UUIDs. Summaries are injected as user-assistant pairs at the original position. The chain is rewired and verified.
-5. **Post-splice** — Reports results and either relaunches the session in a new terminal (orchestrated mode) or shows the manual resume command.
+4. **Splice** — `lethe-splice.py` re-synthesizes the JSONL from the cut-plan into a working copy. Kept entries preserve their original UUIDs. Summaries are injected as user-assistant pairs at the original position. The chain is rewired, verified, and the resulting token count estimated.
+5. **Gate** — The spliced working copy's estimated token count is measured against `compact_size`. If within threshold, Lethe backs up the original and promotes the working copy. If not, the candidate is discarded and Lethe routes to a fallback (see [When the Sip Is Too Small](#when-the-sip-is-too-small)).
+6. **Post-splice** — Reports results and either relaunches the session in a new terminal (orchestrated mode) or shows the manual resume command.
+
+### When the Sip Is Too Small
+
+Sometimes Lethe's surgical approach can't reduce context enough. If the spliced result still exceeds `compact_size`, the working copy is discarded — the original is untouched — and Lethe falls back to the deep drink of standard `/compact`:
+
+| Mode | Behavior |
+|---|---|
+| Orchestrated | Launches standard compact automatically |
+| Manual (interactive) | Reports the overshoot and recommends standard compact |
+| Manual (non-interactive) | Launches standard compact automatically |
+
+The standard compact fallback:
+
+1. Snapshot the current JSONL line count as a baseline
+2. Launch `claude --resume <session> "compact"`
+3. Watch for the compact boundary (new lines past baseline)
+4. Terminate the compact session once the boundary is detected
+5. Relaunch the resumed session
+
+If the compact times out or errors, Lethe retries once. On the second failure, it fails closed — no further relaunch attempts in that cycle. The sip may not have been deep enough, but the original session data is never at risk.
 
 ## What Gets Preserved, What Gets Removed
 
@@ -138,31 +198,7 @@ If your terminal isn't detected, Lethe falls back to printing a manual `claude -
 
 ## Permissions
 
-### Permission Modes
-
-Lethe launches two types of Claude Code sessions, each with a configurable `--permission-mode`:
-
-| Session | Env var | `.lethe_config` key | Default |
-|---|---|---|---|
-| Compactor | `LETHE_COMPACTOR_PERMISSION` | `compactor_permission` | `acceptEdits` |
-| Resumed | `LETHE_RESUME_PERMISSION` | `resume_permission` | *(no flag)* |
-
-Valid values are `acceptEdits` and `bypassPermissions`. Invalid values produce a warning and fall back to the default — misconfiguration never silently escalates permissions.
-
-**Resolution order** (per key, first match wins):
-1. Environment variable
-2. Project-level `.lethe_config` (in project root)
-3. User-level `.lethe_config` (in `$HOME`)
-4. Hardcoded default
-
-Example `.lethe_config`:
-```
-# Project-level Lethe configuration
-compactor_permission=bypassPermissions
-resume_permission=acceptEdits
-```
-
-Keys use the same names as the env vars without the `LETHE_` prefix. One key=value per line, `#` comments, no whitespace around `=`.
+Lethe launches two types of Claude Code sessions, each using the permission mode configured via `compactor_permission` and `resume_permission` (see [Configuration](#configuration)). Valid values are `acceptEdits` and `bypassPermissions`.
 
 ### Bash Allow Rules
 
@@ -189,10 +225,17 @@ Note that `--permission-mode acceptEdits` does **not** cover Bash commands — i
 
 **Without allow rules**, Lethe still works — you'll just confirm each step manually. This is practical for manual mode (`/lethe <session-id>`) but tedious during self-compaction where several commands fire in quick succession.
 
+## Communication Routing
+
+Lethe adapts its voice to match its environment. In interactive sessions where `AskUserQuestion` is available, Lethe communicates through normal prompts and direct output — the familiar conversational flow. In non-interactive sessions (orchestrated runs, subagent contexts), user-facing status updates are relayed through `SendMessage` instead.
+
+This routing is automatic. Launch prompts, success reports, gate-fail notices, PID notifications, and fallback status updates all flow through whichever channel is available — no configuration needed.
+
 ## Safety
 
-- **Atomic writes** — New JSONL is written to a temp file, fsynced, then renamed over the original. No partial writes.
-- **Timestamped backups** — The original JSONL is copied to a `.bak-YYYYMMDD-HHMMSS-xxxx` file before overwrite.
+- **Working-copy isolation** — Splice operates on a `.jsonl.working` copy. The original JSONL is never modified until the gate passes.
+- **Three-condition commit** — The original is only replaced after: (1) successful splice on the working copy, (2) gate pass (estimated tokens within `compact_size`), and (3) successful backup creation. If any condition fails, the original is untouched.
+- **Timestamped backups** — Before promotion, the original is backed up to `<session>.jsonl.lethe-<ts>-<rand>`. No overwrites without a safety net.
 - **Chain verification** — After splicing, Lethe walks the new chain and verifies: all kept UUIDs are reachable, all summaries are present, no dropped entries leaked through, and turn alternation is intact. If verification fails, the original is not overwritten.
 - **Summary sidecar validation** — Summary file paths must be absolute, resolve to a regular file, and be located under the session's `/tmp/lethe/<session_id>/` directory. Relative paths, symlink escapes, `..` traversal, directories, and device nodes are all rejected.
 - **Cut-plan input hardening** — The splicer validates cut-plan structure before execution: required fields, unique segment IDs, action allowlist (`keep`/`drop`/`summarize`), and mandatory `summary_file` for summarize actions.
@@ -221,7 +264,7 @@ lethe/
 │   └── lethe/
 │       ├── SKILL.md                     # Main skill (routing, self-compaction, guardrails)
 │       ├── references/
-│       │   ├── compactor.md             # 5-phase compactor protocol
+│       │   ├── compactor.md             # 6-phase compactor protocol
 │       │   └── rules.md                 # Segment classification rules + mapping table
 │       ├── examples/
 │       │   ├── example-segment-manifest.md  # Annotated manifest with field guide
@@ -230,7 +273,7 @@ lethe/
 │       └── scripts/
 │           ├── lethe_utils.py           # Shared: JSONL parsing, chain walking, classification, config
 │           ├── lethe-analyze.py         # Structural analysis → segment manifest
-│           ├── lethe-config.py          # Permission configuration resolver
+│           ├── lethe-config.py          # Configuration resolver (permissions, compact size)
 │           ├── lethe-discover.py        # Session discovery + terminal detection
 │           └── lethe-splice.py          # Cut-plan → re-synthesized JSONL
 ├── tests/                               # Unit and integration tests
@@ -252,13 +295,13 @@ The rules table currently uses a single default mode. Two additional modes are p
 
 ### Additional configuration keys
 
-The `.lethe_config` infrastructure is in place (see [Permissions](#permissions)). Additional config keys are planned:
+The `.lethe_config` infrastructure is in place (see [Configuration](#configuration)). Additional config keys are planned:
 
 | Setting | Env var | Description |
 |---|---|---|
 | Compaction mode | `LETHE_MODE` | `default`, `strict`, or `relaxed` |
 | Dry run | `LETHE_DRY_RUN` | Run analyze + decide, preview the cut-plan, but don't splice |
-| Skip backups | `LETHE_NO_BACKUP` | Don't create `.bak` files (splicer already supports this internally) |
+| Skip backups | `LETHE_NO_BACKUP` | Don't create backup files (splicer already supports this internally) |
 | Context threshold | `LETHE_CONTEXT_THRESHOLD` | Override the 70% proactive trigger (e.g., `80`) |
 | Preserve thinking | `LETHE_PRESERVE_THINKING` | Override Always Drop for thinking blocks |
 | Minimum segments | `LETHE_MIN_SEGMENTS` | Don't compact sessions with fewer segments than this |
