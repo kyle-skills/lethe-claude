@@ -90,13 +90,19 @@ self-compaction mode only and do not apply when operating as a compactor.
    Output: "Terminal could not be detected. Exit this session first, then run:"
    `claude "/lethe <session_id> --project-slug <project_slug>"`
    where `<session_id>` is from the discovery output. STOP — do not proceed.
-8. Build a launch script to avoid nested quoting issues:
+8. Resolve permission configuration before building the launch script:
+   ```bash
+   python3 scripts/lethe-config.py --project-dir <cwd>
+   ```
+   where `<cwd>` is from the discovery output (step 6). Parse the JSON output and
+   extract `compactor_permission` (defaults to `acceptEdits`).
+   Then build a launch script to avoid nested quoting issues:
    ```bash
    mkdir -p /tmp/lethe/<session_id>
    DELIM="LAUNCH_$(uuidgen | tr -d '-')"
    cat > /tmp/lethe/<session_id>/launch.sh << "$DELIM"
    #!/bin/bash
-   exec env -u CLAUDECODE claude --permission-mode acceptEdits \
+   exec env -u CLAUDECODE claude --permission-mode <compactor_permission> \
      "/lethe <session_id> --project-slug <project_slug> --orchestrate <claude_pid> <resume_prompt>"
    $DELIM
    chmod +x /tmp/lethe/<session_id>/launch.sh
@@ -114,8 +120,9 @@ self-compaction mode only and do not apply when operating as a compactor.
    reboot (`/tmp` is ephemeral). No explicit cleanup is needed.
    `uuidgen` is reused here for the delimiter; availability was already verified
    in step 1.
-   - `--permission-mode acceptEdits` is required — the compactor runs kill commands,
-     writes to /tmp, and modifies JSONL files in ~/.claude/projects/.
+   - `--permission-mode` defaults to `acceptEdits` — the compactor runs kill commands,
+     writes to /tmp, and modifies JSONL files in ~/.claude/projects/. Configurable to
+     `bypassPermissions` via `LETHE_COMPACTOR_PERMISSION` env var or `.lethe_config`.
    - `env -u CLAUDECODE` prevents nested session conflicts.
    If the launch command fails, report the error and provide the manual command:
    "Exit this session first, then run: `claude \"/lethe <session_id> --project-slug <project_slug>\"`"
