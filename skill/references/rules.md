@@ -27,7 +27,9 @@ protocol: Compaction Rules
 
 ## Segment Type to Rule Mapping
 
-Positional rules (marked **Positional**) are checked first regardless of type.
+Positional rules (marked **Positional**) are checked first regardless of type,
+except for Always Drop types (thinking, progress) which are always dropped
+even in positional positions.
 Then apply type-based rules in table order.
 
 | Segment Type | Default Rule | Notes |
@@ -41,7 +43,7 @@ Then apply type-based rules in table order.
 | `error_chain` | Evaluate | May reveal workarounds — read before deciding |
 | `tool_chain` (Read/Grep/Glob) | Aggressive Trim | Exploration results, keep only findings |
 | `tool_chain` (Edit/Write) | Moderate Trim | Preserve what changed and why |
-| `tool_chain` (Bash, other) | Aggressive Trim | Summarize command and exit status |
+| `tool_chain` (Bash, all others) | Aggressive Trim | Summarize command and exit status |
 | `task_result` | Aggressive Trim | Subagent results, keep outcome only |
 | `git_diff` | Aggressive Trim | Summarize files + nature of changes |
 | `conversation` | Evaluate | May be critical decisions or casual chat |
@@ -49,6 +51,10 @@ Then apply type-based rules in table order.
 To determine the tool sub-type for `tool_chain` segments, check the `tool_names`
 field in the segment manifest. If the segment contains multiple tool types,
 use the most conservative rule (Moderate Trim over Aggressive Trim).
+
+`tool_chain` sub-type is determined by the `tool_names` field in the segment
+manifest. Tools not explicitly listed (TodoRead, TodoWrite, Task as tool_chain,
+Skill, ToolSearch, etc.) follow the "all others" rule: Aggressive Trim.
 </core>
 </section>
 
@@ -57,9 +63,14 @@ use the most conservative rule (Moderate Trim over Aggressive Trim).
 ## Always Drop
 
 - **Thinking blocks** — entries containing `<thinking>` tags. Internal reasoning
-  is never needed on resume. No exceptions.
+  is never needed on resume, even in positional positions (e.g., final segment).
 - **Progress entries** — streaming progress markers with no content value.
   These are display artifacts, not conversation.
+- **Micro-compact boundaries** — `microcompact_boundary` system entries are
+  internal optimization markers from Claude Code's auto-compaction. They carry
+  no summary content (only `"Context microcompacted"` and token metadata).
+  Unlike full `compact_boundary` entries, these are classified as progress
+  (Always Drop).
 </mandatory>
 </section>
 
