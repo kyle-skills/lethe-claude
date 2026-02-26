@@ -469,10 +469,10 @@ def build_segments(chain: list[tuple[int, dict]]) -> list[dict]:
             if block.get("type") == "tool_result" and block.get("is_error"):
                 current_segment["has_errors"] = True
 
-        # Token estimation: chars / 4 approximation. Counts message content
+        # Token estimation: conservative chars / 3 approximation. Counts message content
         # only — excludes entry metadata overhead (~50 tokens per entry).
         text = get_text_content(entry)
-        current_segment["estimated_tokens"] += len(text) // 4
+        current_segment["estimated_tokens"] += len(text) // 3
 
     if current_segment is not None:
         segments.append(current_segment)
@@ -535,42 +535,57 @@ def get_session_metadata(lines: list[dict]) -> dict:
     return metadata
 
 
-# Config keys and their corresponding env vars
+# Config keys and their corresponding env vars.
+# compact_size is config-only (env/.lethe_config/default) and does not accept
+# caller fallback overrides.
 _CONFIG_KEYS = {
     "compactor_permission": "LETHE_COMPACTOR_PERMISSION",
     "resume_permission": "LETHE_RESUME_PERMISSION",
+    "compact_size": "LETHE_COMPACT_SIZE",
 }
 
 # Defaults applied when resolution completes without finding a value
 _CONFIG_DEFAULTS = {
     "compactor_permission": "acceptEdits",
     "resume_permission": None,
+    "compact_size": 400000,
 }
 
 
+_CALLER_OVERRIDE_KEYS = {"compactor_permission", "resume_permission"}
+
+
 def resolve_config(project_dir: str | None = None, caller_overrides: dict | None = None) -> dict:
-    """Resolve Lethe permission configuration.
+    """Resolve Lethe configuration.
 
     Resolution order (per key, first match wins):
-    1. Environment variable (LETHE_COMPACTOR_PERMISSION, LETHE_RESUME_PERMISSION)
+    1. Environment variable (LETHE_COMPACTOR_PERMISSION, LETHE_RESUME_PERMISSION,
+       LETHE_COMPACT_SIZE)
     2. Project-level .lethe_config (in project_dir)
     3. User-level .lethe_config (in $HOME)
     4. Caller-provided fallbacks (lowest priority, below all user config)
-    5. Hardcoded default (acceptEdits for compactor, None for resume)
+    5. Hardcoded default (acceptEdits for compactor, None for resume,
+       400000 for compact_size)
 
     Caller overrides are intended for orchestration systems (e.g., Souffleur)
-    that pass a suggested permission mode. They never override user config.
+    that pass suggested permission modes. They never override user config and
+    do not apply to compact_size.
 
-    Returns: {"compactor_permission": str, "resume_permission": str | None}
+    Returns:
+      {
+        "compactor_permission": str,
+        "resume_permission": str | None,
+        "compact_size": int,
+      }
     """
-    result: dict[str, str | None] = {k: None for k in _CONFIG_KEYS}
+    result: dict[str, int | str | None] = {k: None for k in _CONFIG_KEYS}
     resolved: set[str] = set()
 
     # 1. Environment variables
     for key, env_var in _CONFIG_KEYS.items():
         raw = os.environ.get(env_var, "").strip()
         if raw:
-            validated = _validate_permission(key, raw)
+            validated = _validate_config_value(key, raw)
             if validated is not None:
                 result[key] = validated
                 resolved.add(key)
@@ -584,7 +599,7 @@ def resolve_config(project_dir: str | None = None, caller_overrides: dict | None
         parsed = _parse_lethe_config(project_config)
         for key in _CONFIG_KEYS:
             if key not in resolved and key in parsed:
-                validated = _validate_permission(key, parsed[key])
+                validated = _validate_config_value(key, parsed[key])
                 if validated is not None:
                     result[key] = validated
                     resolved.add(key)
@@ -597,18 +612,18 @@ def resolve_config(project_dir: str | None = None, caller_overrides: dict | None
     parsed = _parse_lethe_config(home_config)
     for key in _CONFIG_KEYS:
         if key not in resolved and key in parsed:
-            validated = _validate_permission(key, parsed[key])
+            validated = _validate_config_value(key, parsed[key])
             if validated is not None:
                 result[key] = validated
                 resolved.add(key)
 
     # 4. Caller-provided fallbacks (below all user config)
     if caller_overrides:
-        for key in _CONFIG_KEYS:
+        for key in _CALLER_OVERRIDE_KEYS:
             if key not in resolved and key in caller_overrides:
                 raw = caller_overrides[key]
                 if raw:
-                    validated = _validate_permission(key, raw)
+                    validated = _validate_config_value(key, raw)
                     if validated is not None:
                         result[key] = validated
                         resolved.add(key)
@@ -656,3 +671,31 @@ def _validate_permission(key: str, value: str) -> str | None:
         case _:
             print(f"Warning: invalid value '{value}' for {key}, using default", file=sys.stderr)
             return None
+
+
+def _validate_compact_size(value: str) -> int | None:
+    """Validate compact_size as a positive integer."""
+    try:
+        parsed = int(value)
+    except ValueError:
+        print(
+            f"Warning: invalid value '{value}' for compact_size, using default",
+            file=sys.stderr,
+        )
+        return None
+
+    if parsed <= 0:
+        print(
+            f"Warning: invalid value '{value}' for compact_size, using default",
+            file=sys.stderr,
+        )
+        return None
+
+    return parsed
+
+
+def _validate_config_value(key: str, value: str) -> int | str | None:
+    """Validate config values by key."""
+    if key == "compact_size":
+        return _validate_compact_size(value)
+    return _validate_permission(key, value)

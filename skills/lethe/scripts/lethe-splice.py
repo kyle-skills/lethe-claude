@@ -233,7 +233,7 @@ def build_new_jsonl(
 
         # Token estimation for this segment using pre-built map
         seg_tokens = sum(
-            len(get_text_content(uuid_to_entry[uid])) // 4
+            len(get_text_content(uuid_to_entry[uid])) // 3
             for uid in seg["entry_uuids"]
             if uid in uuid_to_entry
         )
@@ -296,7 +296,7 @@ def build_new_jsonl(
                 raise ValueError(f"Summary file {summary_file} is empty")
 
             # Estimate summary tokens
-            stats["new_tokens_est"] += len(summary_text) // 4 + 20  # +20 for ack
+            stats["new_tokens_est"] += len(summary_text) // 3 + 20  # +20 for ack
 
             user_entry, assistant_entry = make_summary_pair(
                 summary_text, last_emitted_uuid, metadata,

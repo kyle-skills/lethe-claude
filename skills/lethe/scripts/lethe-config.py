@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """
-Lethe: Permission Configuration Resolver
+Lethe: Configuration Resolver
 
-Resolves permission config from environment variables and .lethe_config files.
+Resolves Lethe config from environment variables and .lethe_config files.
 
 Usage: lethe-config.py [--project-dir PATH]
 
 Outputs resolved config as JSON to stdout:
-    {"compactor_permission": "acceptEdits", "resume_permission": null}
+    {
+      "compactor_permission": "acceptEdits",
+      "resume_permission": null,
+      "compact_size": 400000
+    }
 
 Exit code: always 0 — config resolution never fails. Invalid values produce
 stderr warnings but the output is always valid JSON with safe defaults.
@@ -27,7 +31,7 @@ from lethe_utils import resolve_config
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Lethe: Permission configuration resolver"
+        description="Lethe: configuration resolver"
     )
     parser.add_argument(
         "--project-dir",

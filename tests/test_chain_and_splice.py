@@ -196,6 +196,88 @@ class TestAnalyzeCLI(unittest.TestCase):
 
 
 class TestSpliceCLI(unittest.TestCase):
+    def test_token_estimation_uses_chars_div_3(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session_id = "token-est-3"
+            jsonl_path = Path(tmpdir) / "session.jsonl"
+            jsonl_path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "type": "system",
+                                "subtype": "compact_boundary",
+                                "uuid": "31000000-0000-0000-0000-000000000001",
+                                "sessionId": session_id,
+                                "isSidechain": False,
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "type": "user",
+                                "uuid": "31000000-0000-0000-0000-000000000002",
+                                "parentUuid": "31000000-0000-0000-0000-000000000001",
+                                "sessionId": session_id,
+                                "isSidechain": False,
+                                "message": {"role": "user", "content": "abcd"},  # 4 chars -> 1 token
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "type": "assistant",
+                                "uuid": "31000000-0000-0000-0000-000000000003",
+                                "parentUuid": "31000000-0000-0000-0000-000000000002",
+                                "sessionId": session_id,
+                                "isSidechain": False,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": [{"type": "text", "text": "efghij"}],  # 6 chars -> 2 tokens
+                                },
+                            }
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            analyze = subprocess.run(
+                [sys.executable, ANALYZE_SCRIPT, session_id, "--jsonl-path", str(jsonl_path)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(analyze.returncode, 0, msg=analyze.stderr)
+            manifest = json.loads(analyze.stdout)
+            plan = {
+                "actions": [
+                    {"segment_id": seg["id"], "action": "keep"}
+                    for seg in manifest["segments"]
+                ]
+            }
+            plan_path = Path(tmpdir) / "keep-plan.json"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+
+            splice = subprocess.run(
+                [
+                    sys.executable,
+                    SPLICE_SCRIPT,
+                    session_id,
+                    "--jsonl-path",
+                    str(jsonl_path),
+                    "--cut-plan",
+                    str(plan_path),
+                    "--no-backup",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(splice.returncode, 0, msg=splice.stderr)
+            result = json.loads(splice.stdout)
+            self.assertEqual(result["original_tokens_est"], 3)
+            self.assertEqual(result["new_tokens_est"], 3)
+
     def test_keep_all_with_existing_summary_marker_stays_valid(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             session_id = "keep-existing-summary"

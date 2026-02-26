@@ -6,11 +6,12 @@ description: >-
   "compact my context", "trim my conversation", or when running as a
   compactor with a SESSION_ID argument. Can also be used proactively when
   context usage exceeds 70% and autonomous compaction is permitted.
-version: 1.2.0
+version: 1.3.0
 ---
 
 <sections>
 - router
+- communication-routing
 - self-compaction
 - autonomous-guardrails
 </sections>
@@ -59,6 +60,19 @@ Validate that SESSION_ID is a valid UUID (8-4-4-4-12 hex format). If not,
 report the error and STOP — do not proceed with an invalid session identifier.
 Read references/compactor.md. Follow it exactly. The sections below are for
 self-compaction mode only and do not apply when operating as a compactor.
+</mandatory>
+</section>
+
+<section id="communication-routing">
+<mandatory>
+Determine whether `AskUserQuestion` is available before user-facing messaging.
+
+- If available: run in interactive output mode.
+- If unavailable: run in relay mode and route user-facing output via
+  `SendMessage`.
+
+In relay mode, do not block on interactive prompts. Any flow that normally asks
+for launch confirmation defaults to launch behavior.
 </mandatory>
 </section>
 

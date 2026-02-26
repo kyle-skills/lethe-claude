@@ -1,4 +1,4 @@
-<skill name="lethe-compactor" version="1.2">
+<skill name="lethe-compactor" version="1.3">
 
 <metadata>
 type: reference
@@ -10,10 +10,12 @@ permissions: Bash (kill, cat, mkdir, chmod, nohup, ps, python3, uuidgen)
 
 <sections>
 - arguments
+- communication-mode
 - phase-1-kill
 - phase-2-analyze
 - phase-3-decide
 - phase-4-splice
+- phase-4-standard-compact-fallback
 - phase-5-post-splice
 </sections>
 
@@ -50,6 +52,24 @@ When `--orchestrate` is not provided, the target session must already be
 stopped. Compacting a live session risks data loss — entries written after
 the read but before the atomic rename are silently overwritten.
 </core>
+</section>
+
+<section id="communication-mode">
+<mandatory>
+## Communication Mode Detection
+
+Before Phase 1, determine whether `AskUserQuestion` is available.
+
+- If available: `COMM_MODE=interactive`
+- If unavailable: `COMM_MODE=relay`
+
+Routing rules:
+- In `interactive` mode, user-facing output stays in normal session output.
+- In `relay` mode, all user-facing output/messages must be routed via
+  `SendMessage` (no interactive prompts).
+- In `relay` mode, any branch that normally asks the user to choose launch
+  behavior defaults to launch behavior automatically.
+</mandatory>
 </section>
 
 <section id="phase-1-kill">
@@ -186,31 +206,86 @@ Summary length targets by trim level:
 
 <section id="phase-4-splice">
 <core>
-## Phase 4: Splice
+## Phase 4: Staged Splice + Compact-Size Gate
 
-1. Run the re-synthesis splicer:
+1. Resolve JSONL path for the target session:
+   - If `PROJECT_SLUG` is provided:
+     ```bash
+     JSONL_PATH="$HOME/.claude/projects/$PROJECT_SLUG/$SESSION_ID.jsonl"
+     ```
+   - Otherwise:
+     ```bash
+     JSONL_PATH="$(ls -1 "$HOME"/.claude/projects/*/"$SESSION_ID".jsonl 2>/dev/null | head -n 1)"
+     ```
+   If `JSONL_PATH` is empty or missing, STOP with error.
+
+2. Resolve config once for both gate and relaunch permissions:
+   ```bash
+   python3 scripts/lethe-config.py --project-dir <cwd> [--fallback-resume-permission <MODE>]
+   ```
+   where `<cwd>` is from the Phase 2 manifest metadata (or `INITIAL_CWD` fallback).
+   Parse and store:
+   - `compact_size` (default `400000`, from `LETHE_COMPACT_SIZE` / `compact_size`)
+   - `resume_permission`
+
+3. Create a working candidate file:
+   ```bash
+   WORKING_JSONL="${JSONL_PATH}.working"
+   cp "$JSONL_PATH" "$WORKING_JSONL"
+   ```
+
+4. Run the splicer against the working copy only:
    ```bash
    python3 scripts/lethe-splice.py $SESSION_ID \
-     --cut-plan /tmp/lethe/$SESSION_ID/cut-plan.json
+     --cut-plan /tmp/lethe/$SESSION_ID/cut-plan.json \
+     --jsonl-path "$WORKING_JSONL" \
+     --no-backup
    ```
-   If `PROJECT_SLUG` is available, pass `--project-slug "$PROJECT_SLUG"`.
-2. Parse the result JSON from stdout.
-3. Verify the result shows `"ok": true` and `chain_verification.ok: true`.
-4. Record the reduction stats for reporting:
-   `original_tokens_est`, `new_tokens_est`, `reduction_pct`,
-   `segments_kept`, `segments_dropped`, `segments_summarized`.
-5. If `reduction_pct` is below 5%, call it a negligible reduction in the
-   final report so users can decide whether future compactions are worth it.
+
+5. Parse splice result and verify:
+   - `ok == true`
+   - `chain_verification.ok == true`
+   On failure:
+   - discard working copy
+   - STOP (do not modify original JSONL)
+
+6. Evaluate compact-size gate:
+   - Read `new_tokens_est` from splice result.
+   - Gate condition:
+     ```text
+     new_tokens_est <= compact_size
+     ```
+
+7. Gate pass:
+   - Backup original using Lethe-specific naming:
+     ```bash
+     TS="$(date -u +%Y%m%d-%H%M%S)"
+     RAND="$(python3 - <<'PY'
+import random, string
+print(''.join(random.choices(string.ascii_lowercase + string.digits, k=4)))
+PY
+)"
+     BACKUP_PATH="${JSONL_PATH}.lethe-${TS}-${RAND}"
+     cp "$JSONL_PATH" "$BACKUP_PATH"
+     mv "$WORKING_JSONL" "$JSONL_PATH"
+     ```
+   - Continue to Phase 5.
+
+8. Gate fail:
+   - discard working copy (`rm -f "$WORKING_JSONL"`)
+   - set `GATE_FAILED=true`
+   - continue to Phase 4 fallback routing.
 </core>
 
 <mandatory>
-Never proceed past a failed splice. A broken JSONL means the session cannot
-be resumed safely. If `ok` is false or chain verification fails:
+Never proceed past a failed staged splice. A broken JSONL means the session
+cannot be resumed safely. If staged splice fails verification:
 1. Report the error details.
-2. If `backup_path` is present, note it. If null, state that the original JSONL
-   was not overwritten.
+2. State that the original JSONL was not overwritten.
 3. Clean up working directory: `rm -rf /tmp/lethe/$SESSION_ID/`
 4. STOP. Do not attempt Phase 5.
+
+If gate passes, original JSONL must only be replaced after backup succeeds.
 
 If the splicer exits non-zero and stdout is empty, inspect stderr first.
 
@@ -219,26 +294,76 @@ Note: if the compactor aborts at any phase (1-4), always clean up
 </mandatory>
 </section>
 
+<section id="phase-4-standard-compact-fallback">
+<core>
+## Phase 4 Fallback: Standard Compact
+
+This fallback runs only when `GATE_FAILED=true`.
+
+Mode routing:
+- If `--orchestrate` is provided: run fallback compact flow.
+- If `--orchestrate` is not provided and `COMM_MODE=interactive`:
+  report/recommend standard compact (`claude --resume "$SESSION_ID" "compact"`) and STOP.
+- If `--orchestrate` is not provided and `COMM_MODE=relay`:
+  run fallback compact flow automatically (no prompt).
+
+Fallback compact flow:
+1. Capture baseline:
+   ```bash
+   BASELINE_LINES="$(wc -l < "$JSONL_PATH")"
+   ```
+2. Detect terminal and launch an external compact session:
+   - Detect terminal launch template:
+     ```bash
+     python3 scripts/lethe-discover.py --detect-terminal $$ --cwd <cwd>
+     ```
+   - Build compact script:
+     ```bash
+     DELIM="FALLBACK_COMPACT_$(uuidgen | tr -d '-')"
+     cat > /tmp/lethe/$SESSION_ID/fallback-compact.sh << "$DELIM"
+     #!/bin/bash
+     echo $$ > /tmp/lethe/$SESSION_ID/fallback-compact.pid
+     exec env -u CLAUDECODE claude [--permission-mode <resume_permission>] --resume <session-id> "compact"
+     $DELIM
+     chmod +x /tmp/lethe/$SESSION_ID/fallback-compact.sh
+     ```
+   - Launch using terminal template (`{command}` -> script path) with:
+     `nohup ... &` followed by `disown`.
+3. Watch JSONL lines after baseline for:
+   `{"type":"system","subtype":"compact_boundary", ...}`
+4. On detection, terminate fallback compact session using captured PID.
+5. Continue to Phase 5 relaunch rules.
+
+Watcher rules:
+- Parse only lines with index `> BASELINE_LINES`.
+- Parse appended lines as JSON; ignore malformed lines.
+- Timeout after 300 seconds if no compact boundary appears.
+
+Retry policy:
+- First fallback compact failure (timeout or step error): retry once.
+- Second fallback compact failure: fail closed and STOP.
+</core>
+
+<mandatory>
+In `COMM_MODE=relay`, user-facing fallback status updates must be routed via
+`SendMessage`, including retry and fail-closed outcomes.
+</mandatory>
+</section>
+
 <section id="phase-5-post-splice">
 <mandatory>
 ## Phase 5: Post-Splice
 
-If --orchestrate was provided → follow Section A. Otherwise → follow Section B.
-Do not mix sections. Execute exactly one.
+This phase runs only when one of these is true:
+- Staged gate passed and working JSONL was promoted, or
+- Standard compact fallback completed successfully.
 
-Before branching into Section A or B, resolve permission configuration:
-```bash
-python3 scripts/lethe-config.py --project-dir <cwd> [--fallback-resume-permission <MODE>]
-```
-where `<cwd>` is from the Phase 2 manifest metadata (or `INITIAL_CWD` fallback).
-Include `--fallback-resume-permission` only when the compactor received
-`--fallback-resume-permission` in its own arguments. This passes the caller's
-suggestion as lowest-priority fallback — env vars and .lethe_config files always
-take precedence over caller-provided values.
+Use `resume_permission` resolved in Phase 4:
+- if null, omit `--permission-mode`
+- if non-null, include `--permission-mode <resume_permission>`
 
-Parse the JSON output and extract `resume_permission`.
-If `resume_permission` is null, omit `--permission-mode` from all relaunch/resume
-commands below. If non-null, include `--permission-mode <resume_permission>`.
+In `COMM_MODE=relay`, route all user-facing output in this phase via
+`SendMessage`.
 </mandatory>
 
 <core>
@@ -306,11 +431,13 @@ commands below. If non-null, include `--permission-mode <resume_permission>`.
    "Session $SESSION_ID compacted successfully.
    Reduction: [original_tokens_est] → [new_tokens_est] tokens ([reduction_pct]%).
    Segments: [kept] kept, [summarized] summarized, [dropped] dropped."
-2. Ask the user: "Launch the resumed session in a new terminal?"
-   - If no: output the manual command:
-     `env -u CLAUDECODE claude [--permission-mode <resume_permission>] --resume $SESSION_ID`
-     Include `--permission-mode` only when `resume_permission` is non-null. Then stop.
-   - If yes: continue to step 3.
+2. Branch by communication mode:
+   - `COMM_MODE=interactive`: Ask "Launch the resumed session in a new terminal?"
+     - If no: output the manual command:
+       `env -u CLAUDECODE claude [--permission-mode <resume_permission>] --resume $SESSION_ID`
+       Include `--permission-mode` only when `resume_permission` is non-null. Then stop.
+     - If yes: continue to step 3.
+   - `COMM_MODE=relay`: Do not ask. Default to launch behavior and continue to step 3.
 3. Retrieve `cwd` from the Phase 2 manifest metadata. If null/empty, use
    `INITIAL_CWD` from Phase 2 step 1. If that is unavailable, use `$HOME`.
 4. Detect the terminal for relaunch:
