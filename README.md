@@ -21,6 +21,7 @@ Install from marketplace:
 
 ```text
 /plugin marketplace add kyle-skills/lethe-claude
+/plugin install lethe
 ```
 
 For local development, clone the repository and add it as a plugin path:

@@ -1,0 +1,13 @@
+{
+  "name": "kyle-skills",
+  "owner": {
+    "name": "Kyle Corbeille"
+  },
+  "plugins": [
+    {
+      "name": "lethe",
+      "source": ".",
+      "description": "Surgical context compaction — a measured sip from the river of forgetfulness"
+    }
+  ]
+}
