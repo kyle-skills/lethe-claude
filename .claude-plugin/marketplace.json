@@ -6,7 +6,7 @@
   "plugins": [
     {
       "name": "lethe",
-      "source": ".",
+      "source": "./",
       "description": "Surgical context compaction — a measured sip from the river of forgetfulness"
     }
   ]
