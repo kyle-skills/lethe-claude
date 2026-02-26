@@ -17,10 +17,20 @@ The `lethe` skill is a measured *sip* of forgetfulness. Instead of a blunt memor
 
 ## Installation
 
-Clone into your Claude Code skills directory:
+Install from marketplace:
+
+```text
+/plugin marketplace add kyle-skills/lethe-claude
+```
+
+For local development, clone the repository and add it as a plugin path:
 
 ```bash
-git clone https://github.com/kyle-skills/lethe-claude.git ~/.claude/skills/lethe
+git clone https://github.com/kyle-skills/lethe-claude.git
+```
+
+```text
+/plugin add ./lethe-claude
 ```
 
 No dependencies beyond Python 3.10+ (standard library only).
@@ -204,22 +214,24 @@ The Python scripts (analysis, chain walking, classification, splicing) have been
 
 ```
 lethe/
-├── plugin.json                          # Plugin manifest
-├── skill/
-│   ├── SKILL.md                         # Main skill (routing, self-compaction, guardrails)
-│   ├── references/
-│   │   ├── compactor.md                 # 5-phase compactor protocol
-│   │   └── rules.md                     # Segment classification rules + mapping table
-│   ├── examples/
-│   │   ├── example-segment-manifest.md  # Annotated manifest with field guide
-│   │   ├── example-cut-plan-with-sidecars.md  # Cut-plan + summary file examples
-│   │   └── example-splice-result.md     # Splice result with verification guide
-│   └── scripts/
-│       ├── lethe_utils.py               # Shared: JSONL parsing, chain walking, classification, config
-│       ├── lethe-analyze.py             # Structural analysis → segment manifest
-│       ├── lethe-config.py              # Permission configuration resolver
-│       ├── lethe-discover.py            # Session discovery + terminal detection
-│       └── lethe-splice.py              # Cut-plan → re-synthesized JSONL
+├── .claude-plugin/
+│   └── plugin.json                      # Plugin manifest
+├── skills/
+│   └── lethe/
+│       ├── SKILL.md                     # Main skill (routing, self-compaction, guardrails)
+│       ├── references/
+│       │   ├── compactor.md             # 5-phase compactor protocol
+│       │   └── rules.md                 # Segment classification rules + mapping table
+│       ├── examples/
+│       │   ├── example-segment-manifest.md  # Annotated manifest with field guide
+│       │   ├── example-cut-plan-with-sidecars.md  # Cut-plan + summary file examples
+│       │   └── example-splice-result.md # Splice result with verification guide
+│       └── scripts/
+│           ├── lethe_utils.py           # Shared: JSONL parsing, chain walking, classification, config
+│           ├── lethe-analyze.py         # Structural analysis → segment manifest
+│           ├── lethe-config.py          # Permission configuration resolver
+│           ├── lethe-discover.py        # Session discovery + terminal detection
+│           └── lethe-splice.py          # Cut-plan → re-synthesized JSONL
 ├── tests/                               # Unit and integration tests
 │   ├── test_config.py                   # Permission config resolution tests
 │   └── test_chain_and_splice.py         # Chain walking, sidechain, path validation tests

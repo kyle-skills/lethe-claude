@@ -2,7 +2,7 @@
 
 **Date:** 2026-02-25
 **Last Updated:** 2026-02-26
-**Status:** Active design (aligned with `skill/SKILL.md` v1.0.0)
+**Status:** Active design (aligned with `skills/lethe/SKILL.md` v1.1.0)
 **Scope:** Standalone Claude Code plugin for public release
 **Dependencies:** Python 3.10+ (standard library only)
 
@@ -66,26 +66,28 @@ Empirically reflected in `lethe_utils.py` and splicer behavior:
 
 ```text
 lethe/
-  plugin.json
-  skill/
-    SKILL.md
-    references/
-      compactor.md
-      rules.md
-    examples/
-      example-segment-manifest.md
-      example-cut-plan-with-sidecars.md
-      example-splice-result.md
-    scripts/
-      lethe-discover.py
-      lethe-analyze.py
-      lethe-splice.py
-      lethe_utils.py
+  .claude-plugin/
+    plugin.json
+  skills/
+    lethe/
+      SKILL.md
+      references/
+        compactor.md
+        rules.md
+      examples/
+        example-segment-manifest.md
+        example-cut-plan-with-sidecars.md
+        example-splice-result.md
+      scripts/
+        lethe-discover.py
+        lethe-analyze.py
+        lethe-splice.py
+        lethe_utils.py
 ```
 
 ---
 
-## Skill Router (`skill/SKILL.md`)
+## Skill Router (`skills/lethe/SKILL.md`)
 
 ### Router Mode Split
 

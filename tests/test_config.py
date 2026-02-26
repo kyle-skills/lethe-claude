@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 # Add scripts dir to path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "skill" / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "skills" / "lethe" / "scripts"))
 
 from lethe_utils import _parse_lethe_config, _validate_permission, resolve_config
 
@@ -172,7 +172,7 @@ class TestResolveConfig(unittest.TestCase):
             self.assertEqual(result["resume_permission"], "acceptEdits")
 
 
-SCRIPT = str(Path(__file__).resolve().parent.parent / "skill" / "scripts" / "lethe-config.py")
+SCRIPT = str(Path(__file__).resolve().parent.parent / "skills" / "lethe" / "scripts" / "lethe-config.py")
 
 
 class TestLetheConfigCLI(unittest.TestCase):

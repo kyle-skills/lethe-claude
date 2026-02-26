@@ -12,16 +12,16 @@ from contextlib import redirect_stderr
 from pathlib import Path
 
 # Add scripts dir to path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "skill" / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "skills" / "lethe" / "scripts"))
 
 from lethe_utils import resolve_summary_file_path, walk_chain
 
 
 ANALYZE_SCRIPT = str(
-    Path(__file__).resolve().parent.parent / "skill" / "scripts" / "lethe-analyze.py"
+    Path(__file__).resolve().parent.parent / "skills" / "lethe" / "scripts" / "lethe-analyze.py"
 )
 SPLICE_SCRIPT = str(
-    Path(__file__).resolve().parent.parent / "skill" / "scripts" / "lethe-splice.py"
+    Path(__file__).resolve().parent.parent / "skills" / "lethe" / "scripts" / "lethe-splice.py"
 )
 
 

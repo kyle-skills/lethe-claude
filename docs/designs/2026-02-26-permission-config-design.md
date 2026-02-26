@@ -209,12 +209,12 @@ resolution skips the project-level file and continues to `$HOME` → defaults.
 
 | File | Change |
 |---|---|
-| `skill/scripts/lethe_utils.py` | Add `resolve_config`, `_parse_lethe_config`, `_validate_permission` |
-| `skill/scripts/lethe-config.py` | New file — CLI wrapper |
-| `skill/SKILL.md` | Add config resolution step before launch script, use `compactor_permission` |
-| `skill/references/compactor.md` | Add config resolution at Phase 5 start, conditional `--permission-mode` in relaunch/resume scripts and manual fallback commands |
+| `skills/lethe/scripts/lethe_utils.py` | Add `resolve_config`, `_parse_lethe_config`, `_validate_permission` |
+| `skills/lethe/scripts/lethe-config.py` | New file — CLI wrapper |
+| `skills/lethe/SKILL.md` | Add config resolution step before launch script, use `compactor_permission` |
+| `skills/lethe/references/compactor.md` | Add config resolution at Phase 5 start, conditional `--permission-mode` in relaunch/resume scripts and manual fallback commands |
 | `README.md` | Update Permissions and Planned Features sections |
-| `plugin.json` | Version bump (1.0.0 → 1.1.0) |
+| `.claude-plugin/plugin.json` | Version bump (1.0.0 → 1.1.0) |
 
 ---
 
